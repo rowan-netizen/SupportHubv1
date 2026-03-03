@@ -1,0 +1,5 @@
+{
+  "name": "SupportHub Knowledge Base",
+  "description": "An internal knowledge base for customer support teams with hierarchical folders, team-based access, search, and content expiration tracking.",
+  "requestFramePermissions": []
+}

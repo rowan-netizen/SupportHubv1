@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SupportHub Knowledge Base - Standalone</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.30.0/index.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .prose img { border-radius: 0.75rem; }
+        .prose a { color: #4f46e5; text-decoration: none; }
+        .prose a:hover { text-decoration: underline; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.05); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.1); }
+    </style>
+</head>
+<body class="bg-[#F5F5F5] text-[#1A1A1A] overflow-hidden">
+    <div id="app" class="flex h-screen w-full"></div>
+
+    <script>
+        // --- Data Store (Simulating Backend with LocalStorage) ---
+        class Store {
+            constructor() {
+                this.init();
+            }
+
+            init() {
+                if (!localStorage.getItem('kb_folders')) {
+                    const initialFolders = [
+                        { id: 1, name: 'General', parent_id: null },
+                        { id: 2, name: 'Technical', parent_id: null },
+                        { id: 3, name: 'Billing', parent_id: null },
+                        { id: 4, name: 'Onboarding', parent_id: 1 }
+                    ];
+                    localStorage.setItem('kb_folders', JSON.stringify(initialFolders));
+                }
+                if (!localStorage.getItem('kb_articles')) {
+                    const initialArticles = [
+                        { 
+                            id: 1, 
+                            title: 'Getting Started', 
+                            content: '# Welcome\nThis is your knowledge base.', 
+                            folder_id: 1, 
+                            updated_at: new Date().toISOString(),
+                            expires_at: null,
+                            tags: 'intro,help'
+                        }
+                    ];
+                    localStorage.setItem('kb_articles', JSON.stringify(initialArticles));
+                }
+                if (!localStorage.getItem('kb_users')) {
+                    localStorage.setItem('kb_users', JSON.stringify([
+                        { id: 1, name: 'Admin User', email: 'admin@example.com', role: 'admin', team_id: 1 }
+                    ]));
+                }
+                if (!localStorage.getItem('kb_teams')) {
+                    localStorage.setItem('kb_teams', JSON.stringify([
+                        { id: 1, name: 'General' },
+                        { id: 2, name: 'Technical' }
+                    ]));
+                }
+            }
+
+            get(key) { return JSON.parse(localStorage.getItem('kb_' + key) || '[]'); }
+            save(key, data) { localStorage.setItem('kb_' + key, JSON.stringify(data)); }
+
+            addArticle(article) {
+                const articles = this.get('articles');
+                const newArticle = { 
+                    ...article, 
+                    id: Date.now(), 
+                    updated_at: new Date().toISOString(),
+                    created_at: new Date().toISOString()
+                };
+                articles.push(newArticle);
+                this.save('articles', articles);
+                return newArticle;
+            }
+
+            updateArticle(id, updates) {
+                const articles = this.get('articles');
+                const idx = articles.findIndex(a => a.id === id);
+                if (idx !== -1) {
+                    articles[idx] = { ...articles[idx], ...updates, updated_at: new Date().toISOString() };
+                    this.save('articles', articles);
+                }
+            }
+
+            deleteArticle(id) {
+                const articles = this.get('articles').filter(a => a.id !== id);
+                this.save('articles', articles);
+            }
+
+            batchUpdateArticles(ids, updates) {
+                const articles = this.get('articles');
+                ids.forEach(id => {
+                    const idx = articles.findIndex(a => a.id === id);
+                    if (idx !== -1) {
+                        articles[idx] = { ...articles[idx], ...updates, updated_at: new Date().toISOString() };
+                    }
+                });
+                this.save('articles', articles);
+            }
+        }
+
+        const store = new Store();
+
+        // --- State Management ---
+        let state = {
+            view: 'knowledge', // 'knowledge', 'admin', 'announcements'
+            selectedTopFolderId: null,
+            selectedSubFolderId: null,
+            selectedFolderId: null,
+            selectedArticleId: null,
+            isEditing: false,
+            isCreatingArticle: false,
+            articleSearch: '',
+            adminTab: 'users',
+            selectedBatchIds: []
+        };
+
+        function setState(updates) {
+            state = { ...state, ...updates };
+            render();
+        }
+
+        // --- Components ---
+
+        function Sidebar() {
+            return `
+                <aside class="w-20 bg-white border-r border-black/5 flex flex-col items-center py-6 gap-6 shrink-0">
+                    <div class="w-10 h-10 bg-black rounded-xl flex items-center justify-center mb-4">
+                        <i data-lucide="file-text" class="text-white w-6 h-6"></i>
+                    </div>
+                    <div class="flex-1 flex flex-col gap-4">
+                        <button onclick="setState({view: 'knowledge', selectedFolderId: null})" class="p-3 rounded-xl transition-all ${state.view === 'knowledge' ? 'bg-black text-white shadow-lg' : 'text-black/20 hover:text-black hover:bg-black/5'}">
+                            <i data-lucide="book-open" class="w-5 h-5"></i>
+                        </button>
+                        <button onclick="setState({view: 'announcements'})" class="p-3 rounded-xl transition-all ${state.view === 'announcements' ? 'bg-black text-white shadow-lg' : 'text-black/20 hover:text-black hover:bg-black/5'}">
+                            <i data-lucide="bell" class="w-5 h-5"></i>
+                        </button>
+                    </div>
+                    <button onclick="setState({view: 'admin'})" class="p-3 rounded-xl transition-all ${state.view === 'admin' ? 'bg-black text-white shadow-lg' : 'text-black/20 hover:text-black hover:bg-black/5'}">
+                        <i data-lucide="settings" class="w-5 h-5"></i>
+                    </button>
+                </aside>
+            `;
+        }
+
+        function KnowledgeView() {
+            const folders = store.get('folders');
+            const articles = store.get('articles').filter(a => {
+                if (state.articleSearch) return a.title.toLowerCase().includes(state.articleSearch.toLowerCase());
+                if (state.selectedFolderId) return a.folder_id === state.selectedFolderId;
+                return true;
+            });
+
+            const selectedArticle = store.get('articles').find(a => a.id === state.selectedArticleId);
+
+            return `
+                <div class="flex-1 flex flex-col overflow-hidden">
+                    <header class="h-20 bg-white border-b border-black/5 flex items-center justify-between px-8 shrink-0">
+                        <div class="flex items-center gap-4">
+                            <h2 class="text-xl font-bold tracking-tight">Knowledge Base</h2>
+                            <div class="h-4 w-px bg-black/10"></div>
+                            <div class="flex items-center gap-2 text-sm text-black/40 font-medium">
+                                <i data-lucide="folder" class="w-4 h-4"></i>
+                                ${state.selectedFolderId ? folders.find(f => f.id === state.selectedFolderId).name : 'All Knowledge'}
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <div class="relative">
+                                <i data-lucide="search" class="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-black/20"></i>
+                                <input 
+                                    type="text" 
+                                    placeholder="Search articles..." 
+                                    class="bg-[#F5F5F5] border-none rounded-xl pl-10 pr-4 py-2 text-sm outline-none w-64 focus:ring-2 focus:ring-black/5 transition-all"
+                                    value="${state.articleSearch}"
+                                    oninput="state.articleSearch = this.value; render()"
+                                />
+                            </div>
+                            <button onclick="createNewArticle()" class="bg-black text-white px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-black/80 transition-colors">
+                                <i data-lucide="plus" class="w-4 h-4"></i>
+                                New Article
+                            </button>
+                        </div>
+                    </header>
+
+                    <div class="flex-1 flex overflow-hidden">
+                        <!-- Folders -->
+                        <div class="w-64 border-r border-black/5 flex flex-col bg-white shrink-0">
+                            <div class="p-4 border-b border-black/5 flex items-center justify-between">
+                                <span class="text-[10px] font-bold uppercase tracking-wider text-black/40">Folders</span>
+                            </div>
+                            <div class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                                ${folders.filter(f => f.parent_id === null).map(f => `
+                                    <button onclick="selectFolder(${f.id})" class="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all ${state.selectedTopFolderId === f.id ? 'bg-black text-white' : 'hover:bg-black/5 text-black/70'}">
+                                        <i data-lucide="folder" class="w-4 h-4"></i>
+                                        ${f.name}
+                                    </button>
+                                    ${state.selectedTopFolderId === f.id ? folders.filter(sub => sub.parent_id === f.id).map(sub => `
+                                        <button onclick="selectFolder(${sub.id})" class="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all ml-4 ${state.selectedSubFolderId === sub.id ? 'bg-black text-white' : 'hover:bg-black/5 text-black/70'}">
+                                            <i data-lucide="folder" class="w-4 h-4"></i>
+                                            ${sub.name}
+                                        </button>
+                                    `).join('') : ''}
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <!-- Article List -->
+                        <div class="w-80 border-r border-black/5 flex flex-col bg-[#FAFAFA] shrink-0">
+                            <div class="p-4 border-b border-black/5 flex items-center justify-between bg-white">
+                                <span class="text-[10px] font-bold uppercase tracking-wider text-black/40">Articles</span>
+                            </div>
+                            <div class="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+                                ${articles.map(a => `
+                                    <button onclick="selectArticle(${a.id})" class="w-full text-left p-4 rounded-2xl transition-all ${state.selectedArticleId === a.id ? 'bg-white shadow-lg ring-1 ring-black/5' : 'hover:bg-white/50'}">
+                                        <h3 class="font-semibold text-sm line-clamp-1 mb-1">${a.title}</h3>
+                                        <p class="text-[10px] text-black/40 line-clamp-2 leading-relaxed">${a.content.replace(/#|\*|_/g, '').slice(0, 60)}...</p>
+                                    </button>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <!-- Content Area -->
+                        <div class="flex-1 overflow-y-auto bg-white custom-scrollbar">
+                            ${state.isEditing || state.isCreatingArticle ? Editor(selectedArticle) : Viewer(selectedArticle)}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function Viewer(article) {
+            if (!article) return `
+                <div class="h-full flex flex-col items-center justify-center text-center p-10">
+                    <div class="w-20 h-20 bg-[#F5F5F5] rounded-3xl flex items-center justify-center mb-6">
+                        <i data-lucide="file-text" class="w-10 h-10 text-black/10"></i>
+                    </div>
+                    <h3 class="text-xl font-semibold tracking-tight mb-2">Select an article</h3>
+                    <p class="text-sm text-black/40 max-w-xs">Navigate through folders to find the knowledge you need.</p>
+                </div>
+            `;
+
+            return `
+                <div class="p-10 max-w-4xl mx-auto">
+                    <div class="flex items-center justify-between mb-12">
+                        <div class="flex items-center gap-4 text-xs text-black/40">
+                            <div class="flex items-center gap-1.5">
+                                <i data-lucide="clock" class="w-3.5 h-3.5"></i>
+                                Updated ${new Date(article.updated_at).toLocaleDateString()}
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <button onclick="setState({isEditing: true})" class="flex items-center gap-2 text-sm font-medium hover:text-black/60 transition-colors">
+                                <i data-lucide="edit-3" class="w-4 h-4"></i>
+                                Edit Article
+                            </button>
+                            <button onclick="deleteArticle(${article.id})" class="flex items-center gap-2 text-sm font-medium text-red-500 hover:text-red-700 transition-colors">
+                                <i data-lucide="trash-2" class="w-4 h-4"></i>
+                                Delete
+                            </button>
+                        </div>
+                    </div>
+                    <h1 class="text-5xl font-bold tracking-tight mb-8 leading-[1.1]">${article.title}</h1>
+                    <div class="prose prose-slate max-w-none">
+                        ${marked.parse(article.content)}
+                    </div>
+                </div>
+            `;
+        }
+
+        function Editor(article) {
+            const title = article ? article.title : '';
+            const content = article ? article.content : '';
+
+            return `
+                <div class="h-full flex flex-col">
+                    <div class="h-16 border-b border-black/5 flex items-center justify-between px-8 bg-white shrink-0">
+                        <span class="text-sm font-bold uppercase tracking-widest text-black/20">${article ? 'Edit' : 'New'} Article</span>
+                        <div class="flex gap-3">
+                            <button onclick="setState({isEditing: false, isCreatingArticle: false})" class="px-4 py-2 text-sm font-medium text-black/40 hover:text-black transition-colors">Cancel</button>
+                            <button onclick="saveArticle()" class="bg-black text-white px-6 py-2 rounded-xl text-sm font-medium hover:bg-black/80 transition-colors">Save Changes</button>
+                        </div>
+                    </div>
+                    <div class="flex-1 p-8 overflow-y-auto custom-scrollbar">
+                        <div class="max-w-4xl mx-auto space-y-6">
+                            <input 
+                                id="edit-title"
+                                type="text" 
+                                placeholder="Article Title" 
+                                class="w-full text-4xl font-bold tracking-tight border-none outline-none placeholder:text-black/10"
+                                value="${title}"
+                            />
+                            <textarea 
+                                id="edit-content"
+                                placeholder="Write your content in Markdown..." 
+                                class="w-full h-[500px] text-lg border-none outline-none resize-none placeholder:text-black/10 font-mono"
+                            >${content}</textarea>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function AdminView() {
+            const users = store.get('users');
+            const teams = store.get('teams');
+            const folders = store.get('folders');
+            const articles = store.get('articles');
+
+            return `
+                <div class="flex-1 flex flex-col bg-[#FAFAFA] overflow-hidden">
+                    <div class="flex border-b border-black/5 bg-white px-8 shrink-0">
+                        ${['users', 'groups', 'articles'].map(tab => `
+                            <button onclick="setState({adminTab: '${tab}'})" class="flex items-center gap-2 px-6 py-4 text-sm font-medium border-b-2 transition-all ${state.adminTab === tab ? 'border-black text-black' : 'border-transparent text-black/40 hover:text-black'}">
+                                <i data-lucide="${tab === 'users' ? 'users' : tab === 'groups' ? 'shield' : 'file-text'}" class="w-4 h-4"></i>
+                                ${tab.charAt(0).toUpperCase() + tab.slice(1)}
+                            </button>
+                        `).join('')}
+                    </div>
+                    <div class="flex-1 overflow-y-auto p-8 custom-scrollbar">
+                        <div class="max-w-5xl mx-auto">
+                            ${state.adminTab === 'users' ? `
+                                <div class="space-y-6">
+                                    <h3 class="text-lg font-semibold">User Management</h3>
+                                    <div class="bg-white rounded-2xl border border-black/5 shadow-sm overflow-hidden">
+                                        <table class="w-full text-left text-sm">
+                                            <thead class="bg-[#F5F5F5] text-black/40 font-bold uppercase text-[10px] tracking-wider">
+                                                <tr>
+                                                    <th class="px-6 py-4">Name</th>
+                                                    <th class="px-6 py-4">Email</th>
+                                                    <th class="px-6 py-4">Role</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody class="divide-y divide-black/5">
+                                                ${users.map(u => `
+                                                    <tr>
+                                                        <td class="px-6 py-4 font-medium">${u.name}</td>
+                                                        <td class="px-6 py-4 text-black/60">${u.email}</td>
+                                                        <td class="px-6 py-4"><span class="bg-purple-50 text-purple-600 px-2 py-1 rounded text-[10px] font-bold uppercase">${u.role}</span></td>
+                                                    </tr>
+                                                `).join('')}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            ` : state.adminTab === 'articles' ? ArticleManager(articles, folders) : `
+                                <div class="space-y-6">
+                                    <h3 class="text-lg font-semibold">Group Management</h3>
+                                    <div class="grid grid-cols-2 gap-4">
+                                        ${teams.map(t => `
+                                            <div class="bg-white p-6 rounded-2xl border border-black/5 shadow-sm flex items-center justify-between">
+                                                <h4 class="font-semibold">${t.name}</h4>
+                                                <i data-lucide="shield" class="w-4 h-4 text-black/20"></i>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function ArticleManager(articles, folders) {
+            return `
+                <div class="space-y-6">
+                    <div class="flex justify-between items-center">
+                        <h3 class="text-lg font-semibold">Article Manager</h3>
+                    </div>
+
+                    ${state.selectedBatchIds.length > 0 ? `
+                        <div class="bg-black text-white p-4 rounded-2xl flex items-center justify-between shadow-lg">
+                            <div class="flex items-center gap-6">
+                                <span class="text-sm font-bold">${state.selectedBatchIds.length} selected</span>
+                                <div class="w-px h-4 bg-white/20"></div>
+                                <select onchange="batchMove(this.value)" class="bg-white/10 border-none rounded-lg px-3 py-1.5 text-xs outline-none">
+                                    <option value="" class="text-black">Move to Folder...</option>
+                                    ${folders.map(f => `<option value="${f.id}" class="text-black">${f.name}</option>`).join('')}
+                                </select>
+                                <button onclick="batchSetCurrent()" class="text-xs font-bold hover:text-emerald-400 transition-colors">Set as Current</button>
+                            </div>
+                            <button onclick="setState({selectedBatchIds: []})" class="text-white/40 hover:text-white"><i data-lucide="x" class="w-4 h-4"></i></button>
+                        </div>
+                    ` : ''}
+
+                    <div class="bg-white rounded-2xl border border-black/5 shadow-sm overflow-hidden">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-[#F5F5F5] text-black/40 font-bold uppercase text-[10px] tracking-wider">
+                                <tr>
+                                    <th class="px-6 py-4 w-10"></th>
+                                    <th class="px-6 py-4">Name</th>
+                                    <th class="px-6 py-4">Folder</th>
+                                    <th class="px-6 py-4">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-black/5">
+                                ${articles.map(a => {
+                                    const folder = folders.find(f => f.id === a.folder_id);
+                                    const isSelected = state.selectedBatchIds.includes(a.id);
+                                    return `
+                                        <tr class="${isSelected ? 'bg-black/[0.02]' : ''}">
+                                            <td class="px-6 py-4">
+                                                <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleBatch(${a.id})" class="rounded border-black/10" />
+                                            </td>
+                                            <td class="px-6 py-4 font-medium">${a.title}</td>
+                                            <td class="px-6 py-4 text-black/40">${folder ? folder.name : 'None'}</td>
+                                            <td class="px-6 py-4">
+                                                <span class="bg-emerald-50 text-emerald-600 px-2 py-1 rounded text-[10px] font-bold uppercase">Current</span>
+                                            </td>
+                                        </tr>
+                                    `;
+                                }).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- Actions ---
+
+        window.selectFolder = (id) => {
+            const folders = store.get('folders');
+            const folder = folders.find(f => f.id === id);
+            if (folder.parent_id === null) {
+                setState({ selectedFolderId: id, selectedTopFolderId: id, selectedSubFolderId: null, selectedArticleId: null });
+            } else {
+                setState({ selectedFolderId: id, selectedTopFolderId: folder.parent_id, selectedSubFolderId: id, selectedArticleId: null });
+            }
+        };
+
+        window.selectArticle = (id) => {
+            setState({ selectedArticleId: id, isEditing: false, isCreatingArticle: false });
+        };
+
+        window.createNewArticle = () => {
+            setState({ isCreatingArticle: true, selectedArticleId: null, isEditing: false });
+        };
+
+        window.saveArticle = () => {
+            const title = document.getElementById('edit-title').value;
+            const content = document.getElementById('edit-content').value;
+            if (!title) return alert('Title is required');
+
+            if (state.isCreatingArticle) {
+                const newArt = store.addArticle({ title, content, folder_id: state.selectedFolderId });
+                setState({ isCreatingArticle: false, selectedArticleId: newArt.id });
+            } else {
+                store.updateArticle(state.selectedArticleId, { title, content });
+                setState({ isEditing: false });
+            }
+        };
+
+        window.deleteArticle = (id) => {
+            if (confirm('Delete this article?')) {
+                store.deleteArticle(id);
+                setState({ selectedArticleId: null });
+            }
+        };
+
+        window.toggleBatch = (id) => {
+            const ids = state.selectedBatchIds.includes(id) 
+                ? state.selectedBatchIds.filter(i => i !== id)
+                : [...state.selectedBatchIds, id];
+            setState({ selectedBatchIds: ids });
+        };
+
+        window.batchMove = (folderId) => {
+            if (!folderId) return;
+            store.batchUpdateArticles(state.selectedBatchIds, { folder_id: parseInt(folderId) });
+            setState({ selectedBatchIds: [] });
+        };
+
+        window.batchSetCurrent = () => {
+            store.batchUpdateArticles(state.selectedBatchIds, { expires_at: null });
+            setState({ selectedBatchIds: [] });
+        };
+
+        // --- Main Render Loop ---
+        function render() {
+            const app = document.getElementById('app');
+            app.innerHTML = `
+                ${Sidebar()}
+                ${state.view === 'knowledge' ? KnowledgeView() : AdminView()}
+            `;
+            lucide.createIcons();
+        }
+
+        // Initial Render
+        render();
+    </script>
+</body>
+</html>
+

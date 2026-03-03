@@ -1,0 +1,30 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  .prose h1 { @apply text-4xl font-bold mb-6 tracking-tight; }
+  .prose h2 { @apply text-2xl font-bold mt-8 mb-4 tracking-tight; }
+  .prose h3 { @apply text-xl font-bold mt-6 mb-3 tracking-tight; }
+  .prose p { @apply mb-4 leading-relaxed text-black/80; }
+  .prose ul { @apply list-disc pl-6 mb-4 space-y-2; }
+  .prose ol { @apply list-decimal pl-6 mb-4 space-y-2; }
+  .prose li { @apply text-black/80; }
+  .prose code { @apply bg-[#F5F5F5] px-1.5 py-0.5 rounded text-sm font-mono; }
+  .prose pre { @apply bg-[#1A1A1A] text-white p-4 rounded-2xl overflow-x-auto mb-4 font-mono text-sm; }
+  .prose blockquote { @apply border-l-4 border-black/10 pl-4 italic text-black/60 mb-4; }
+  .prose table { @apply w-full border-collapse mb-6; }
+  .prose th { @apply bg-[#F5F5F5] border border-black/5 px-4 py-2 text-left font-semibold; }
+  .prose td { @apply border border-black/5 px-4 py-2; }
+  .prose details { @apply bg-[#F5F5F5]/30 rounded-2xl border border-black/5 mb-4 overflow-hidden; }
+  .prose summary { @apply px-6 py-4 font-semibold cursor-pointer hover:bg-black/[0.02] transition-colors list-none flex items-center gap-2; }
+  .prose summary::-webkit-details-marker { display: none; }
+  .prose summary::before { content: '→'; @apply text-black/20 transition-transform; }
+  .prose details[open] summary::before { transform: rotate(90deg); }
+  .prose details > :not(summary) { @apply px-6 pb-4; }
+  .prose details > summary + * { @apply pt-2; }
+}
