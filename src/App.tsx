@@ -153,6 +153,7 @@ export default function App() {
 
   // Fetch initial data
   useEffect(() => {
+    console.log("KB App Version: 1.1.0 - Drag and Drop Enabled");
     fetchData();
   }, []);
 
@@ -546,22 +547,49 @@ export default function App() {
     }
   };
 
-  const handleDragStart = (e: React.DragEvent, id: number) => {
-    if (!selectedArticleIds.includes(id)) {
+  const [dragOverFolderId, setDragOverFolderId] = useState<number | null | 'root'>(null);
+
+  const handleDragStart = (e: React.DragEvent, type: 'folder' | 'article', id: number) => {
+    e.dataTransfer.setData('type', type);
+    e.dataTransfer.setData('id', id.toString());
+    e.dataTransfer.effectAllowed = 'move';
+    
+    if (type === 'article' && !selectedArticleIds.includes(id)) {
       setSelectedArticleIds([id]);
     }
-    e.dataTransfer.setData('type', 'article');
   };
 
-  const handleFolderDrop = (e: React.DragEvent, folderId: number | null) => {
+  const handleDragOver = (e: React.DragEvent, folderId: number | null | 'root') => {
     e.preventDefault();
+    setDragOverFolderId(folderId);
+    e.dataTransfer.dropEffect = 'move';
+  };
+
+  const handleDragLeave = () => {
+    setDragOverFolderId(null);
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetFolderId: number | null) => {
+    e.preventDefault();
+    setDragOverFolderId(null);
     const type = e.dataTransfer.getData('type');
-    if (type === 'article') {
-      handleBatchMoveArticles(folderId);
-    } else if (type === 'folder') {
-      const draggedFolderId = parseInt(e.dataTransfer.getData('folderId'));
-      if (draggedFolderId !== folderId) {
-        handleMoveFolder(draggedFolderId, folderId);
+    const id = parseInt(e.dataTransfer.getData('id'));
+
+    if (type === 'folder') {
+      await handleMoveFolder(id, targetFolderId);
+    } else if (type === 'article') {
+      // If we have multiple selected articles, move all of them
+      const idsToMove = selectedArticleIds.length > 0 ? selectedArticleIds : [id];
+      try {
+        await fetch('/api/articles/batch-move', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ article_ids: idsToMove, folder_id: targetFolderId })
+        });
+        fetchArticles(selectedFolderId, '', true);
+        setSelectedArticleIds([]);
+      } catch (error) {
+        console.error('Error moving articles:', error);
       }
     }
   };
@@ -636,7 +664,8 @@ export default function App() {
           </button>
         </div>
 
-        <div className="mt-auto flex flex-col gap-4">
+        <div className="mt-auto flex flex-col items-center gap-4 mb-4">
+          <span className="text-[8px] font-bold text-black/10 uppercase tracking-widest">v1.1.0</span>
           <button className="p-3 rounded-2xl hover:bg-black/5 text-black/40 hover:text-black transition-all group relative" title="Settings">
             <Settings className="w-5 h-5" />
             <span className="absolute left-full ml-4 px-2 py-1 bg-black text-white text-[10px] rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50">Settings</span>
@@ -877,7 +906,18 @@ export default function App() {
             <div className="flex-1 flex overflow-hidden">
               {/* One Column Navigation */}
               <div className="w-80 border-r border-black/5 flex flex-col bg-white shrink-0">
-                <div className="p-4 border-b border-black/5 flex items-center justify-between bg-white">
+                <div 
+                  className={cn(
+                    "p-4 border-b border-black/5 flex items-center justify-between bg-white transition-colors",
+                    dragOverFolderId === 'root' && "bg-emerald-50"
+                  )}
+                  onDragOver={(e) => handleDragOver(e, 'root')}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => {
+                    const current = folders.find(f => f.id === selectedFolderId);
+                    handleDrop(e, current?.parent_id || null);
+                  }}
+                >
                   <div className="flex items-center gap-2 overflow-hidden">
                     {selectedFolderId && (
                       <button 
@@ -895,8 +935,13 @@ export default function App() {
                     </span>
                   </div>
                   <div className="flex gap-1">
-                    <button onClick={() => setIsCreatingFolder(true)} className="p-1 hover:bg-black/5 rounded transition-colors">
+                    <button 
+                      onClick={() => setIsCreatingFolder(true)} 
+                      className="flex items-center gap-1 px-2 py-1 hover:bg-black/5 rounded transition-colors text-black/40 hover:text-black"
+                      title="New Folder"
+                    >
                       <Plus className="w-3 h-3" />
+                      <span className="text-[10px] font-bold uppercase">New</span>
                     </button>
                   </div>
                 </div>
@@ -928,11 +973,19 @@ export default function App() {
                     {folders.filter(f => f.parent_id === selectedFolderId).map(folder => (
                       <div key={folder.id} className="group relative">
                         <button
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, 'folder', folder.id)}
+                          onDragOver={(e) => handleDragOver(e, folder.id)}
+                          onDragLeave={handleDragLeave}
+                          onDrop={(e) => handleDrop(e, folder.id)}
                           onClick={() => handleFolderClick(folder.id)}
-                          className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium hover:bg-black/5 text-black/70 transition-all"
+                          className={cn(
+                            "w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium hover:bg-black/5 text-black/70 transition-all",
+                            dragOverFolderId === folder.id && "bg-emerald-50 text-emerald-700 ring-2 ring-emerald-200 ring-inset"
+                          )}
                         >
                           <div className="flex items-center gap-2 overflow-hidden">
-                            <Folder className="w-4 h-4 text-black/20 shrink-0" />
+                            <Folder className={cn("w-4 h-4 shrink-0", dragOverFolderId === folder.id ? "text-emerald-500" : "text-black/20")} />
                             {editingFolderId === folder.id ? (
                               <input 
                                 autoFocus
@@ -946,8 +999,20 @@ export default function App() {
                             ) : <span className="truncate">{folder.name}</span>}
                           </div>
                           <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                            <Edit3 className="w-3 h-3 text-black/20 hover:text-black cursor-pointer" onClick={(e) => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name); }} />
-                            <Trash2 className="w-3 h-3 text-black/20 hover:text-red-400 cursor-pointer" onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id); }} />
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name); }}
+                              className="p-1 hover:bg-black/10 rounded transition-colors"
+                              title="Rename"
+                            >
+                              <Edit3 className="w-3 h-3 text-black/40 hover:text-black" />
+                            </button>
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id); }}
+                              className="p-1 hover:bg-red-50 rounded transition-colors"
+                              title="Delete"
+                            >
+                              <Trash2 className="w-3 h-3 text-black/40 hover:text-red-500" />
+                            </button>
                             <ChevronRight className="w-3 h-3 text-black/20" />
                           </div>
                         </button>
@@ -963,6 +1028,8 @@ export default function App() {
                     {articles.map(article => (
                       <button
                         key={article.id}
+                        draggable
+                        onDragStart={(e) => handleDragStart(e, 'article', article.id)}
                         onClick={(e) => handleArticleClick(article.id, e.shiftKey || e.metaKey || e.ctrlKey)}
                         className={cn(
                           "w-full text-left p-3 rounded-xl transition-all group relative",
