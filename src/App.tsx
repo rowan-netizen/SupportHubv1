@@ -30,7 +30,7 @@ import {
   Shield,
   UserPlus,
   Lock,
-  Type,
+  Type as LucideType,
   List,
   Quote,
   Code,
@@ -39,14 +39,18 @@ import {
   ChevronDownSquare,
   Info,
   Smile,
-  AlertCircle,
+  GripHorizontal,
+  Brain,
+  Calendar,
+  Sparkles,
+  Send,
   CheckCircle2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { format, isPast, parseISO } from 'date-fns';
+import { format, isPast, parseISO, subDays } from 'date-fns';
 import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import { Placeholder } from '@tiptap/extension-placeholder';
@@ -61,6 +65,18 @@ import { TaskList } from '@tiptap/extension-task-list';
 import { TaskItem } from '@tiptap/extension-task-item';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { GoogleGenAI, Type } from "@google/genai";
+import {
+  DndContext,
+  DragOverlay,
+  useDraggable,
+  useDroppable,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragStartEvent,
+  DragEndEvent,
+} from '@dnd-kit/core';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -98,6 +114,28 @@ interface Announcement {
   created_at: string;
 }
 
+interface QuizQuestion {
+  id?: number;
+  question: string;
+  options: string[];
+  correct_option_index: number;
+  feedback?: string;
+  article_id?: number | null;
+}
+
+interface Quiz {
+  id: number;
+  title: string;
+  description: string;
+  team_id: number | null;
+  created_at: string;
+  expires_at: string | null;
+  created_by: number;
+  status: 'draft' | 'published';
+  team_name?: string;
+  questions?: QuizQuestion[];
+}
+
 interface FolderType {
   id: number;
   name: string;
@@ -116,6 +154,189 @@ interface Article {
   team_access?: number[];
 }
 
+// --- DnD Components ---
+
+function DraggableArticle({ article, children }: { article: Article, children: React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `article-${article.id}`,
+    data: { type: 'article', id: article.id }
+  });
+
+  const style = transform ? {
+    transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
+  } : undefined;
+
+  return (
+    <div ref={setNodeRef} style={style} {...listeners} {...attributes} className={cn(isDragging && "opacity-50")}>
+      {children}
+    </div>
+  );
+}
+
+function DroppableFolder({ id, children, className }: { id: number | null, children: React.ReactNode, className?: string }) {
+  const { isOver, setNodeRef } = useDroppable({
+    id: `folder-${id ?? 'root'}`,
+    data: { type: 'folder', id }
+  });
+
+  return (
+    <div 
+      ref={setNodeRef} 
+      className={cn(
+        className,
+        isOver && "ring-2 ring-indigo-500 ring-inset rounded-xl bg-indigo-50/50"
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function FolderTreeItem({ 
+  folder, 
+  folders, 
+  selectedFolderId, 
+  expandedFolderIds, 
+  editingFolderId, 
+  editFolderName, 
+  setEditFolderName,
+  onFolderClick, 
+  onToggleExpansion, 
+  onRename, 
+  onDelete,
+  setEditingFolderId,
+  isCreatingFolder,
+  setIsCreatingFolder,
+  newFolderName,
+  setNewFolderName,
+  onCreateFolder,
+  editArticle,
+  setEditArticle
+}: any) {
+  const subfolders = folders.filter((f: any) => f.parent_id === folder.id);
+  const isExpanded = expandedFolderIds.includes(folder.id);
+  const isSelected = selectedFolderId === folder.id;
+
+  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+    id: `folder-drag-${folder.id}`,
+    data: { type: 'folder', id: folder.id }
+  });
+
+  const style = transform ? {
+    transform: `translate3d(${transform.x}px, ${transform.y}px, 0)`,
+  } : undefined;
+
+  return (
+    <div className="space-y-1">
+      <DroppableFolder id={folder.id}>
+        <div 
+          ref={setNodeRef} 
+          style={style} 
+          className={cn("group relative", isDragging && "opacity-50")}
+        >
+          <div
+            onClick={() => onFolderClick(folder.id)}
+            className={cn(
+              "w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium transition-all cursor-pointer",
+              isSelected ? "bg-black text-white shadow-md" : "hover:bg-black/5 text-black/70"
+            )}
+          >
+            <div className="flex items-center gap-2 overflow-hidden">
+              <div 
+                onClick={(e) => onToggleExpansion(e, folder.id)}
+                className="p-0.5 hover:bg-white/10 rounded transition-colors"
+              >
+                {subfolders.length > 0 ? (
+                  isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />
+                ) : (
+                  <div className="w-3" />
+                )}
+              </div>
+              <div {...listeners} {...attributes} className="cursor-grab active:cursor-grabbing">
+                <Folder className={cn("w-4 h-4 shrink-0", isSelected ? "text-white" : "text-black/20")} />
+              </div>
+              {editingFolderId === folder.id ? (
+                <input 
+                  autoFocus
+                  className="bg-transparent border-none outline-none text-white w-full"
+                  value={editFolderName}
+                  onChange={(e) => setEditFolderName(e.target.value)}
+                  onBlur={() => onRename(folder.id)}
+                  onKeyDown={(e) => e.key === 'Enter' && onRename(folder.id)}
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <span className="truncate">{folder.name}</span>
+              )}
+            </div>
+            <div className="flex items-center gap-1 shrink-0">
+              <div className={cn(
+                "flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity",
+                isSelected ? "text-white/60" : "text-black/20"
+              )}>
+                <Plus className="w-3 h-3 hover:text-white cursor-pointer" onClick={(e) => { 
+                  e.stopPropagation(); 
+                  setIsCreatingFolder(true); 
+                  setEditArticle({ ...editArticle, folder_id: folder.id });
+                  if (!isExpanded) onToggleExpansion(e, folder.id);
+                }} />
+                <Edit3 className="w-3 h-3 hover:text-white cursor-pointer" onClick={(e) => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name); }} />
+                <Trash2 className="w-3 h-3 hover:text-red-400 cursor-pointer" onClick={(e) => { e.stopPropagation(); onDelete(folder.id); }} />
+              </div>
+            </div>
+          </div>
+        </div>
+      </DroppableFolder>
+
+      {isExpanded && (
+        <div className="pl-4 space-y-1">
+          {isCreatingFolder && editArticle.folder_id === folder.id && (
+            <div className="px-3 py-2 space-y-2 bg-black/5 rounded-xl">
+              <input 
+                autoFocus
+                type="text" 
+                placeholder="Subfolder name..."
+                className="w-full text-sm bg-transparent border-b border-black/10 outline-none py-1"
+                value={newFolderName}
+                onChange={(e) => setNewFolderName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && onCreateFolder()}
+              />
+              <div className="flex gap-2">
+                <button onClick={onCreateFolder} className="text-[10px] font-bold uppercase text-emerald-600">Save</button>
+                <button onClick={() => setIsCreatingFolder(false)} className="text-[10px] font-bold uppercase text-red-600">Cancel</button>
+              </div>
+            </div>
+          )}
+          {subfolders.map((sub: any) => (
+            <FolderTreeItem 
+              key={sub.id}
+              folder={sub}
+              folders={folders}
+              selectedFolderId={selectedFolderId}
+              expandedFolderIds={expandedFolderIds}
+              editingFolderId={editingFolderId}
+              editFolderName={editFolderName}
+              setEditFolderName={setEditFolderName}
+              onFolderClick={onFolderClick}
+              onToggleExpansion={onToggleExpansion}
+              onRename={onRename}
+              onDelete={onDelete}
+              setEditingFolderId={setEditingFolderId}
+              isCreatingFolder={isCreatingFolder}
+              setIsCreatingFolder={setIsCreatingFolder}
+              newFolderName={newFolderName}
+              setNewFolderName={setNewFolderName}
+              onCreateFolder={onCreateFolder}
+              editArticle={editArticle}
+              setEditArticle={setEditArticle}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- Components ---
 
 export default function App() {
@@ -123,6 +344,8 @@ export default function App() {
   const [articles, setArticles] = useState<Article[]>([]);
   const [teams, setTeams] = useState<Team[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [selectedTopFolderId, setSelectedTopFolderId] = useState<number | null>(null);
+  const [selectedSubFolderId, setSelectedSubFolderId] = useState<number | null>(null);
   const [expandedFolderIds, setExpandedFolderIds] = useState<number[]>([]);
   const [selectedArticleId, setSelectedArticleId] = useState<number | null>(null);
   const [selectedArticleIds, setSelectedArticleIds] = useState<number[]>([]);
@@ -142,18 +365,17 @@ export default function App() {
   const [users, setUsers] = useState<User[]>([]);
   const [folderAccess, setFolderAccess] = useState<FolderAccess[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [showAnnouncements, setShowAnnouncements] = useState(false);
+  const [showQuizzes, setShowQuizzes] = useState(false);
+  const [selectedQuizId, setSelectedQuizId] = useState<number | null>(null);
   const [isAnnouncing, setIsAnnouncing] = useState(false);
   const [announcementMessage, setAnnouncementMessage] = useState('');
   const [announcementTeamId, setAnnouncementTeamId] = useState<number | null>(null);
-  const [importPreview, setImportPreview] = useState<any | null>(null);
-  const [importStatus, setImportStatus] = useState<'success' | 'error' | null>(null);
-  const [importErrorMessage, setImportErrorMessage] = useState('');
 
   // Fetch initial data
   useEffect(() => {
-    console.log("KB App Version: 1.1.0 - Drag and Drop Enabled");
     fetchData();
   }, []);
 
@@ -173,6 +395,7 @@ export default function App() {
       setUsers(data.users || []);
       setFolderAccess(data.folderAccess || []);
       setAnnouncements(data.announcements || []);
+      setQuizzes(data.quizzes || []);
       
       // Identify current user (demo logic)
       const userEmail = 'rowan@creativefabrica.com'; // From context
@@ -257,6 +480,22 @@ export default function App() {
     setSearchQuery('');
     fetchArticles(id);
     
+    if (id === null) {
+      setSelectedTopFolderId(null);
+      setSelectedSubFolderId(null);
+    } else {
+      const folder = folders.find(f => f.id === id);
+      if (folder) {
+        if (folder.parent_id === null) {
+          setSelectedTopFolderId(id);
+          setSelectedSubFolderId(null);
+        } else {
+          setSelectedTopFolderId(folder.parent_id);
+          setSelectedSubFolderId(id);
+        }
+      }
+    }
+
     if (id !== null) {
       setExpandedFolderIds(prev => 
         prev.includes(id) ? prev : [...prev, id]
@@ -408,75 +647,78 @@ export default function App() {
   };
 
   const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
     const MAX_SIZE = 30 * 1024 * 1024; // 30MB
-    if (file.size > MAX_SIZE) {
-      alert(`File is too large (max 30MB): ${file.name}`);
+    const oversizedFiles = Array.from(files).filter(f => f.size > MAX_SIZE);
+    if (oversizedFiles.length > 0) {
+      alert(`Some files are too large (max 30MB): ${oversizedFiles.map(f => f.name).join(', ')}`);
       e.target.value = '';
       return;
     }
 
     const formData = new FormData();
-    formData.append('file', file);
+    Array.from(files).forEach(file => {
+      formData.append('files', file);
+    });
     
+    if (selectedFolderId) formData.append('folder_id', selectedFolderId.toString());
+
     setIsImporting(true);
     try {
-      const res = await fetch('/api/import/preview', {
+      const res = await fetch('/api/import', {
         method: 'POST',
         headers: { 'Accept': 'application/json' },
         body: formData,
       });
 
+      const contentType = res.headers.get("content-type");
       if (res.ok) {
-        const data = await res.json();
-        setImportPreview(data);
+        if (contentType && contentType.includes("application/json")) {
+          const data = await res.json();
+          fetchArticles(selectedFolderId, '', true);
+          if (data.results && data.results.length > 0) {
+            const successCount = data.results.filter((r: any) => r.success).length;
+            const failCount = data.results.length - successCount;
+            
+            if (failCount > 0) {
+              alert(`Imported ${successCount} files. ${failCount} files failed.`);
+            }
+            
+            const firstSuccess = data.results.find((r: any) => r.success);
+            if (firstSuccess) {
+              handleArticleClick(firstSuccess.id);
+            }
+          }
+        } else {
+          const text = await res.text();
+          console.error("Expected JSON but got:", text.slice(0, 200));
+          alert(`Import failed: Server returned ${res.status} ${res.statusText} with non-JSON content. Check console for details.`);
+        }
       } else {
         const errorText = await res.text();
-        alert(`Failed to load preview: ${errorText}`);
+        let errorMessage = "Failed to import files.";
+        
+        if (res.status === 413) {
+          errorMessage = "The uploaded file is too large. Please try a smaller file (max 30MB).";
+        } else if (contentType && contentType.includes("application/json")) {
+          try {
+            const errorData = JSON.parse(errorText);
+            errorMessage = errorData.error || errorMessage;
+          } catch (e) {
+            // fallback
+          }
+        }
+        
+        console.error("Error response body:", errorText.slice(0, 500));
+        alert(errorMessage);
       }
     } catch (error) {
-      console.error('Import preview error:', error);
-      alert('Failed to connect to server for preview.');
+      console.error('Import error:', error);
     } finally {
       setIsImporting(false);
       e.target.value = ''; // Reset input
-    }
-  };
-
-  const handleConfirmImport = async () => {
-    if (!importPreview) return;
-    
-    setIsImporting(true);
-    try {
-      const res = await fetch('/api/import/confirm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          tempId: importPreview.tempId,
-          structure: importPreview.structure,
-          folderId: selectedFolderId
-        })
-      });
-
-      if (res.ok) {
-        setImportStatus('success');
-        setImportPreview(null);
-        fetchData(); // Refresh all data
-        setTimeout(() => setImportStatus(null), 3000);
-      } else {
-        const data = await res.json();
-        setImportStatus('error');
-        setImportErrorMessage(data.error || 'Import failed');
-        setTimeout(() => setImportStatus(null), 5000);
-      }
-    } catch (error) {
-      setImportStatus('error');
-      setImportErrorMessage('Network error during import');
-      setTimeout(() => setImportStatus(null), 5000);
-    } finally {
-      setIsImporting(false);
     }
   };
 
@@ -547,49 +789,50 @@ export default function App() {
     }
   };
 
-  const [dragOverFolderId, setDragOverFolderId] = useState<number | null | 'root'>(null);
+  const [activeDragItem, setActiveDragItem] = useState<{ type: 'article' | 'folder', id: number } | null>(null);
 
-  const handleDragStart = (e: React.DragEvent, type: 'folder' | 'article', id: number) => {
-    e.dataTransfer.setData('type', type);
-    e.dataTransfer.setData('id', id.toString());
-    e.dataTransfer.effectAllowed = 'move';
-    
-    if (type === 'article' && !selectedArticleIds.includes(id)) {
-      setSelectedArticleIds([id]);
-    }
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8,
+      },
+    })
+  );
+
+  const handleDragStart = (event: DragStartEvent) => {
+    const { active } = event;
+    setActiveDragItem(active.data.current as any);
   };
 
-  const handleDragOver = (e: React.DragEvent, folderId: number | null | 'root') => {
-    e.preventDefault();
-    setDragOverFolderId(folderId);
-    e.dataTransfer.dropEffect = 'move';
-  };
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveDragItem(null);
 
-  const handleDragLeave = () => {
-    setDragOverFolderId(null);
-  };
+    if (!over) return;
 
-  const handleDrop = async (e: React.DragEvent, targetFolderId: number | null) => {
-    e.preventDefault();
-    setDragOverFolderId(null);
-    const type = e.dataTransfer.getData('type');
-    const id = parseInt(e.dataTransfer.getData('id'));
+    const activeData = active.data.current as { type: 'article' | 'folder', id: number };
+    const overData = over.data.current as { type: 'folder', id: number | null };
 
-    if (type === 'folder') {
-      await handleMoveFolder(id, targetFolderId);
-    } else if (type === 'article') {
-      // If we have multiple selected articles, move all of them
-      const idsToMove = selectedArticleIds.length > 0 ? selectedArticleIds : [id];
-      try {
-        await fetch('/api/articles/batch-move', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ article_ids: idsToMove, folder_id: targetFolderId })
-        });
-        fetchArticles(selectedFolderId, '', true);
-        setSelectedArticleIds([]);
-      } catch (error) {
-        console.error('Error moving articles:', error);
+    if (!activeData || !overData) return;
+
+    if (activeData.type === 'article') {
+      // Move article to folder
+      if (activeData.id && overData.id !== undefined) {
+        try {
+          await fetch('/api/articles/batch-move', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ article_ids: [activeData.id], folder_id: overData.id })
+          });
+          fetchArticles(selectedFolderId, '', true);
+        } catch (error) {
+          console.error('Error moving article:', error);
+        }
+      }
+    } else if (activeData.type === 'folder') {
+      // Move folder to folder
+      if (activeData.id !== overData.id) {
+        handleMoveFolder(activeData.id, overData.id);
       }
     }
   };
@@ -599,7 +842,12 @@ export default function App() {
   }, [articles]);
 
   return (
-    <div className="flex h-screen bg-[#F5F5F5] text-[#1A1A1A] font-sans overflow-hidden">
+    <DndContext 
+      sensors={sensors} 
+      onDragStart={handleDragStart} 
+      onDragEnd={handleDragEnd}
+    >
+      <div className="flex h-screen bg-[#F5F5F5] text-[#1A1A1A] font-sans overflow-hidden">
       {/* Sidebar */}
       <aside className="w-20 bg-white border-r border-black/5 flex flex-col items-center py-6 gap-6">
         <div className="w-10 h-10 bg-black rounded-xl flex items-center justify-center mb-4">
@@ -620,7 +868,7 @@ export default function App() {
           </button>
 
           <button 
-            onClick={() => { setShowAnnouncements(!showAnnouncements); setShowAdmin(false); setShowExpirationAlerts(false); }}
+            onClick={() => { setShowAnnouncements(!showAnnouncements); setShowAdmin(false); setShowExpirationAlerts(false); setShowQuizzes(false); }}
             className={cn(
               "p-3 rounded-2xl transition-all group relative",
               showAnnouncements ? "bg-black text-white shadow-lg" : "hover:bg-black/5 text-black/40 hover:text-black"
@@ -635,7 +883,19 @@ export default function App() {
           </button>
 
           <button 
-            onClick={() => { setShowAdmin(!showAdmin); setShowAnnouncements(false); setShowExpirationAlerts(false); }}
+            onClick={() => { setShowAnnouncements(false); setShowAdmin(false); setShowExpirationAlerts(false); setShowQuizzes(!showQuizzes); }}
+            className={cn(
+              "p-3 rounded-2xl transition-all group relative",
+              showQuizzes ? "bg-black text-white shadow-lg" : "hover:bg-black/5 text-black/40 hover:text-black"
+            )}
+            title="Quizzes"
+          >
+            <Brain className="w-5 h-5" />
+            <span className="absolute left-full ml-4 px-2 py-1 bg-black text-white text-[10px] rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50">Quizzes</span>
+          </button>
+
+          <button 
+            onClick={() => { setShowAdmin(!showAdmin); setShowAnnouncements(false); setShowExpirationAlerts(false); setShowQuizzes(false); }}
             className={cn(
               "p-3 rounded-2xl transition-all group relative",
               showAdmin ? "bg-black text-white shadow-lg" : "hover:bg-black/5 text-black/40 hover:text-black"
@@ -647,7 +907,7 @@ export default function App() {
           </button>
 
           <button 
-            onClick={() => setShowExpirationAlerts(!showExpirationAlerts)}
+            onClick={() => { setShowExpirationAlerts(!showExpirationAlerts); setShowQuizzes(false); }}
             className={cn(
               "p-3 rounded-2xl transition-all group relative",
               showExpirationAlerts ? "bg-amber-500 text-white shadow-lg" : "hover:bg-black/5 text-black/40 hover:text-black"
@@ -664,8 +924,7 @@ export default function App() {
           </button>
         </div>
 
-        <div className="mt-auto flex flex-col items-center gap-4 mb-4">
-          <span className="text-[8px] font-bold text-black/10 uppercase tracking-widest">v1.1.0</span>
+        <div className="mt-auto flex flex-col gap-4">
           <button className="p-3 rounded-2xl hover:bg-black/5 text-black/40 hover:text-black transition-all group relative" title="Settings">
             <Settings className="w-5 h-5" />
             <span className="absolute left-full ml-4 px-2 py-1 bg-black text-white text-[10px] rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50">Settings</span>
@@ -748,99 +1007,6 @@ export default function App() {
           )}
         </header>
 
-        {/* Import Preview Modal */}
-        <AnimatePresence>
-          {importPreview && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                onClick={() => setImportPreview(null)}
-                className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              />
-              <motion.div 
-                initial={{ opacity: 0, scale: 0.95, y: 20 }}
-                animate={{ opacity: 1, scale: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95, y: 20 }}
-                className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
-              >
-                <div className="p-6 border-b border-black/5 flex items-center justify-between bg-[#FAFAFA]">
-                  <div>
-                    <h3 className="text-xl font-bold tracking-tight">Import Preview</h3>
-                    <p className="text-xs text-black/40 mt-1">Review and rename items before importing</p>
-                  </div>
-                  <button 
-                    onClick={() => setImportPreview(null)}
-                    className="p-2 hover:bg-black/5 rounded-full transition-colors"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-6">
-                  <div className="bg-[#F5F5F5] rounded-2xl p-4 border border-black/5">
-                    <ImportPreviewTree 
-                      item={importPreview.structure} 
-                      onChange={(updated) => setImportPreview({ ...importPreview, structure: updated })}
-                    />
-                  </div>
-                </div>
-
-                <div className="p-6 border-t border-black/5 bg-[#FAFAFA] flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-xs text-black/40">
-                    <Info className="w-4 h-4" />
-                    <span>Importing into: {selectedFolderId ? folders.find(f => f.id === selectedFolderId)?.name : 'Root'}</span>
-                  </div>
-                  <div className="flex gap-3">
-                    <button 
-                      onClick={() => setImportPreview(null)}
-                      className="px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-black/5 transition-colors"
-                    >
-                      Cancel
-                    </button>
-                    <button 
-                      onClick={handleConfirmImport}
-                      disabled={isImporting}
-                      className="bg-black text-white px-8 py-2.5 rounded-xl text-sm font-bold hover:bg-black/80 transition-all shadow-lg shadow-black/10 flex items-center gap-2 disabled:opacity-50"
-                    >
-                      {isImporting ? 'Importing...' : 'Confirm Import'}
-                    </button>
-                  </div>
-                </div>
-              </motion.div>
-            </div>
-          )}
-        </AnimatePresence>
-
-        {/* Status Toast */}
-        <AnimatePresence>
-          {importStatus && (
-            <motion.div 
-              initial={{ opacity: 0, y: 50 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 50 }}
-              className={cn(
-                "fixed bottom-8 right-8 z-[110] px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4 border",
-                importStatus === 'success' ? "bg-emerald-500 text-white border-emerald-400" : "bg-red-500 text-white border-red-400"
-              )}
-            >
-              {importStatus === 'success' ? (
-                <CheckCircle2 className="w-6 h-6" />
-              ) : (
-                <AlertCircle className="w-6 h-6" />
-              )}
-              <div>
-                <p className="font-bold text-sm">
-                  {importStatus === 'success' ? 'Import Successful' : 'Import Failed'}
-                </p>
-                <p className="text-xs opacity-90">
-                  {importStatus === 'success' ? 'Your knowledge base has been updated.' : importErrorMessage}
-                </p>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
         {/* Content Area */}
         <div className="flex-1 flex overflow-hidden">
           {showAdmin ? (
@@ -850,11 +1016,79 @@ export default function App() {
               folders={folders} 
               articles={articles}
               folderAccess={folderAccess} 
+              quizzes={quizzes}
               onUpdateUsers={(newUsers) => setUsers(newUsers)}
               onUpdateTeams={(newTeams) => setTeams(newTeams)}
               onUpdateFolderAccess={(newAccess) => setFolderAccess(newAccess)}
               onUpdateArticles={(newArticles) => setArticles(newArticles)}
+              onUpdateQuizzes={(newQuizzes) => setQuizzes(newQuizzes)}
+              currentUser={currentUser}
             />
+          ) : showQuizzes ? (
+            selectedQuizId ? (
+              <QuizPlayer 
+                quiz={quizzes.find(q => q.id === selectedQuizId)!} 
+                onClose={() => setSelectedQuizId(null)} 
+                onViewArticle={(id) => {
+                  setSelectedArticleId(id);
+                  setShowQuizzes(false);
+                  setSelectedQuizId(null);
+                }}
+              />
+            ) : (
+              <div className="flex-1 overflow-y-auto bg-[#FAFAFA] p-8">
+                <div className="max-w-5xl mx-auto space-y-8">
+                  <div className="space-y-1">
+                    <h3 className="text-3xl font-bold">Knowledge Quizzes</h3>
+                    <p className="text-black/40">Test your knowledge on recent updates and company policies.</p>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-6">
+                    {quizzes.filter(q => q.status === 'published' && (q.team_id === null || q.team_id === currentUser?.team_id)).map(quiz => (
+                      <button 
+                        key={quiz.id}
+                        onClick={async () => {
+                          const res = await fetch(`/api/quizzes/${quiz.id}`);
+                          if (res.ok) {
+                            const fullQuiz = await res.json();
+                            setQuizzes(quizzes.map(q => q.id === quiz.id ? fullQuiz : q));
+                            setSelectedQuizId(quiz.id);
+                          }
+                        }}
+                        className="bg-white p-8 rounded-[32px] border border-black/5 shadow-sm hover:shadow-xl hover:shadow-black/[0.02] hover:border-black/10 transition-all text-left flex flex-col justify-between group"
+                      >
+                        <div className="space-y-4">
+                          <div className="w-12 h-12 bg-indigo-50 text-indigo-500 rounded-2xl flex items-center justify-center group-hover:scale-110 transition-transform">
+                            <Brain className="w-6 h-6" />
+                          </div>
+                          <div className="space-y-2">
+                            <h4 className="text-xl font-bold">{quiz.title}</h4>
+                            <p className="text-sm text-black/40 line-clamp-2">{quiz.description}</p>
+                          </div>
+                        </div>
+                        <div className="mt-8 pt-6 border-t border-black/5 flex items-center justify-between">
+                          <div className="flex items-center gap-3 text-[10px] font-bold uppercase tracking-wider text-black/20">
+                            <span className="flex items-center gap-1">
+                              <List className="w-3 h-3" />
+                              5 Questions
+                            </span>
+                            {quiz.expires_at && (
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3" />
+                                Due {format(parseISO(quiz.expires_at), 'MMM d')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="w-8 h-8 rounded-full bg-black text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all -translate-x-2 group-hover:translate-x-0">
+                            <ChevronRight className="w-4 h-4" />
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
           ) : showAnnouncements ? (
             <div className="flex-1 overflow-y-auto bg-[#FAFAFA] p-8">
               <div className="max-w-3xl mx-auto space-y-4">
@@ -885,6 +1119,18 @@ export default function App() {
                         )}
                       </div>
                       <p className="text-sm text-black/70 leading-relaxed">{a.message}</p>
+                      {a.message.includes('New Quiz Available:') && (
+                        <button 
+                          onClick={() => {
+                            setShowQuizzes(true);
+                            setShowAnnouncements(false);
+                          }}
+                          className="flex items-center gap-2 text-xs font-bold text-indigo-500 hover:text-indigo-600 transition-colors"
+                        >
+                          <Brain className="w-3.5 h-3.5" />
+                          Go to Quizzes
+                        </button>
+                      )}
                       {a.article_id && (
                         <button 
                           onClick={() => {
@@ -904,152 +1150,130 @@ export default function App() {
             </div>
           ) : (
             <div className="flex-1 flex overflow-hidden">
-              {/* One Column Navigation */}
-              <div className="w-80 border-r border-black/5 flex flex-col bg-white shrink-0">
-                <div 
-                  className={cn(
-                    "p-4 border-b border-black/5 flex items-center justify-between bg-white transition-colors",
-                    dragOverFolderId === 'root' && "bg-emerald-50"
-                  )}
-                  onDragOver={(e) => handleDragOver(e, 'root')}
-                  onDragLeave={handleDragLeave}
-                  onDrop={(e) => {
-                    const current = folders.find(f => f.id === selectedFolderId);
-                    handleDrop(e, current?.parent_id || null);
-                  }}
-                >
-                  <div className="flex items-center gap-2 overflow-hidden">
-                    {selectedFolderId && (
-                      <button 
-                        onClick={() => {
-                          const current = folders.find(f => f.id === selectedFolderId);
-                          handleFolderClick(current?.parent_id || null);
-                        }}
-                        className="p-1 hover:bg-black/5 rounded transition-colors shrink-0"
-                      >
-                        <ChevronLeft className="w-4 h-4 text-black/40" />
-                      </button>
-                    )}
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-black/40 truncate">
-                      {selectedFolderId ? folders.find(f => f.id === selectedFolderId)?.name : 'Knowledge Base'}
-                    </span>
-                  </div>
-                  <div className="flex gap-1">
-                    <button 
-                      onClick={() => setIsCreatingFolder(true)} 
-                      className="flex items-center gap-1 px-2 py-1 hover:bg-black/5 rounded transition-colors text-black/40 hover:text-black"
-                      title="New Folder"
+              {/* Column 1: Folder Tree */}
+              <div className="w-64 border-r border-black/5 flex flex-col bg-white shrink-0">
+                <div className="p-4 border-b border-black/5 flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-black/40">Knowledge Base</span>
+                  <button onClick={() => { setIsCreatingFolder(true); setEditArticle({ ...editArticle, folder_id: null }); }} className="p-1 hover:bg-black/5 rounded transition-colors">
+                    <Plus className="w-3 h-3" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-2">
+                  <DroppableFolder 
+                    id={null} 
+                    className="mb-2"
+                  >
+                    <button
+                      onClick={() => handleFolderClick(null)}
+                      className={cn(
+                        "w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all",
+                        selectedFolderId === null ? "bg-black text-white shadow-md" : "hover:bg-black/5 text-black/70"
+                      )}
                     >
-                      <Plus className="w-3 h-3" />
-                      <span className="text-[10px] font-bold uppercase">New</span>
+                      <Folder className={cn("w-4 h-4", selectedFolderId === null ? "text-white" : "text-black/20")} />
+                      All Knowledge
+                    </button>
+                  </DroppableFolder>
+
+                  <div className="space-y-1">
+                    {isCreatingFolder && !editArticle.folder_id && (
+                      <div className="px-3 py-2 space-y-2 bg-black/5 rounded-xl mb-1">
+                        <input 
+                          autoFocus
+                          type="text" 
+                          placeholder="Folder name..."
+                          className="w-full text-sm bg-transparent border-b border-black/10 outline-none py-1"
+                          value={newFolderName}
+                          onChange={(e) => setNewFolderName(e.target.value)}
+                          onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
+                        />
+                        <div className="flex gap-2">
+                          <button onClick={handleCreateFolder} className="text-[10px] font-bold uppercase text-emerald-600">Save</button>
+                          <button onClick={() => setIsCreatingFolder(false)} className="text-[10px] font-bold uppercase text-red-600">Cancel</button>
+                        </div>
+                      </div>
+                    )}
+                    {folders.filter(f => f.parent_id === null).map(folder => (
+                      <FolderTreeItem 
+                        key={folder.id}
+                        folder={folder}
+                        folders={folders}
+                        selectedFolderId={selectedFolderId}
+                        expandedFolderIds={expandedFolderIds}
+                        editingFolderId={editingFolderId}
+                        editFolderName={editFolderName}
+                        setEditFolderName={setEditFolderName}
+                        onFolderClick={handleFolderClick}
+                        onToggleExpansion={toggleFolderExpansion}
+                        onRename={handleRenameFolder}
+                        onDelete={handleDeleteFolder}
+                        setEditingFolderId={setEditingFolderId}
+                        isCreatingFolder={isCreatingFolder}
+                        setIsCreatingFolder={setIsCreatingFolder}
+                        newFolderName={newFolderName}
+                        setNewFolderName={setNewFolderName}
+                        onCreateFolder={handleCreateFolder}
+                        editArticle={editArticle}
+                        setEditArticle={setEditArticle}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Column 2: Article List */}
+              <div className="w-80 border-r border-black/5 flex flex-col bg-[#FAFAFA] shrink-0">
+                <div className="p-4 border-b border-black/5 flex items-center justify-between bg-white">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-black/40">Articles</span>
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={() => {
+                        if (selectedArticleIds.length === articles.length) setSelectedArticleIds([]);
+                        else setSelectedArticleIds(articles.map(a => a.id));
+                      }}
+                      className="p-1 hover:bg-black/5 rounded transition-colors"
+                    >
+                      {selectedArticleIds.length === articles.length ? <CheckSquare className="w-3 h-3" /> : <Square className="w-3 h-3" />}
                     </button>
                   </div>
                 </div>
-                
-                <div className="flex-1 overflow-y-auto p-2 space-y-4">
-                  {isCreatingFolder && (
-                    <div className="px-3 py-2 space-y-2 bg-black/5 rounded-xl">
-                      <input 
-                        autoFocus
-                        type="text" 
-                        placeholder="New folder name..."
-                        className="w-full text-sm bg-transparent border-b border-black/10 outline-none py-1"
-                        value={newFolderName}
-                        onChange={(e) => setNewFolderName(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && handleCreateFolder()}
-                      />
-                      <div className="flex gap-2">
-                        <button onClick={handleCreateFolder} className="text-[10px] font-bold uppercase text-emerald-600">Save</button>
-                        <button onClick={() => setIsCreatingFolder(false)} className="text-[10px] font-bold uppercase text-red-600">Cancel</button>
-                      </div>
+                <div className="flex-1 overflow-y-auto">
+                  {articles.length === 0 ? (
+                    <div className="p-8 text-center opacity-20">
+                      <FileText className="w-8 h-8 mx-auto mb-3" />
+                      <p className="text-xs font-bold uppercase">No articles</p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col p-2 gap-1">
+                      {articles.map(article => (
+                        <DraggableArticle key={article.id} article={article}>
+                          <button
+                            onClick={(e) => handleArticleClick(article.id, e.shiftKey || e.metaKey || e.ctrlKey)}
+                            className={cn(
+                              "w-full text-left p-4 rounded-2xl transition-all group relative",
+                              selectedArticleId === article.id ? "bg-white shadow-lg ring-1 ring-black/5" : "hover:bg-white/50",
+                              selectedArticleIds.includes(article.id) && "bg-indigo-50/30"
+                            )}
+                          >
+                            <div className="flex items-start justify-between mb-1">
+                              <h3 className={cn(
+                                "font-semibold text-sm line-clamp-1",
+                                selectedArticleId === article.id ? "text-black" : "text-black/70"
+                              )}>
+                                {article.title || "Untitled"}
+                              </h3>
+                              {article.expires_at && isPast(parseISO(article.expires_at)) && (
+                                <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                              )}
+                            </div>
+                            <p className="text-[10px] text-black/40 line-clamp-2 leading-relaxed">
+                              {article.content?.replace(/<[^>]*>/g, '').slice(0, 100) || "No content..."}
+                            </p>
+                          </button>
+                        </DraggableArticle>
+                      ))}
                     </div>
                   )}
-
-                  {/* Folders Section */}
-                  <div className="space-y-1">
-                    {selectedFolderId && folders.some(f => f.parent_id === selectedFolderId) && (
-                      <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-black/20">Subfolders</div>
-                    )}
-                    {folders.filter(f => f.parent_id === selectedFolderId).map(folder => (
-                      <div key={folder.id} className="group relative">
-                        <button
-                          draggable
-                          onDragStart={(e) => handleDragStart(e, 'folder', folder.id)}
-                          onDragOver={(e) => handleDragOver(e, folder.id)}
-                          onDragLeave={handleDragLeave}
-                          onDrop={(e) => handleDrop(e, folder.id)}
-                          onClick={() => handleFolderClick(folder.id)}
-                          className={cn(
-                            "w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-medium hover:bg-black/5 text-black/70 transition-all",
-                            dragOverFolderId === folder.id && "bg-emerald-50 text-emerald-700 ring-2 ring-emerald-200 ring-inset"
-                          )}
-                        >
-                          <div className="flex items-center gap-2 overflow-hidden">
-                            <Folder className={cn("w-4 h-4 shrink-0", dragOverFolderId === folder.id ? "text-emerald-500" : "text-black/20")} />
-                            {editingFolderId === folder.id ? (
-                              <input 
-                                autoFocus
-                                className="bg-transparent border-none outline-none text-black w-full"
-                                value={editFolderName}
-                                onChange={(e) => setEditFolderName(e.target.value)}
-                                onBlur={() => handleRenameFolder(folder.id)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleRenameFolder(folder.id)}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            ) : <span className="truncate">{folder.name}</span>}
-                          </div>
-                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); setEditingFolderId(folder.id); setEditFolderName(folder.name); }}
-                              className="p-1 hover:bg-black/10 rounded transition-colors"
-                              title="Rename"
-                            >
-                              <Edit3 className="w-3 h-3 text-black/40 hover:text-black" />
-                            </button>
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id); }}
-                              className="p-1 hover:bg-red-50 rounded transition-colors"
-                              title="Delete"
-                            >
-                              <Trash2 className="w-3 h-3 text-black/40 hover:text-red-500" />
-                            </button>
-                            <ChevronRight className="w-3 h-3 text-black/20" />
-                          </div>
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Articles Section */}
-                  <div className="space-y-1">
-                    {selectedFolderId && articles.length > 0 && (
-                      <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-black/20">Articles</div>
-                    )}
-                    {articles.map(article => (
-                      <button
-                        key={article.id}
-                        draggable
-                        onDragStart={(e) => handleDragStart(e, 'article', article.id)}
-                        onClick={(e) => handleArticleClick(article.id, e.shiftKey || e.metaKey || e.ctrlKey)}
-                        className={cn(
-                          "w-full text-left p-3 rounded-xl transition-all group relative",
-                          selectedArticleId === article.id ? "bg-black text-white shadow-lg" : "hover:bg-black/5 text-black/70",
-                          selectedArticleIds.includes(article.id) && "ring-1 ring-black/10"
-                        )}
-                      >
-                        <div className="flex items-center gap-2">
-                          <FileText className={cn("w-4 h-4 shrink-0", selectedArticleId === article.id ? "text-white/40" : "text-black/20")} />
-                          <span className="text-sm font-medium line-clamp-1">{article.title || "Untitled"}</span>
-                        </div>
-                      </button>
-                    ))}
-                    {articles.length === 0 && selectedFolderId && !folders.some(f => f.parent_id === selectedFolderId) && (
-                      <div className="px-3 py-10 text-center opacity-20">
-                        <FileText className="w-8 h-8 mx-auto mb-2" />
-                        <p className="text-[10px] font-bold uppercase">Folder is empty</p>
-                      </div>
-                    )}
-                  </div>
                 </div>
               </div>
 
@@ -1351,79 +1575,28 @@ export default function App() {
             </div>
           )}
         </AnimatePresence>
+
+        <DragOverlay>
+          {activeDragItem ? (
+            <div className="bg-white p-4 rounded-2xl shadow-2xl border border-black/5 opacity-80 scale-105 pointer-events-none">
+              <div className="flex items-center gap-3">
+                {activeDragItem.type === 'folder' ? (
+                  <Folder className="w-5 h-5 text-black/40" />
+                ) : (
+                  <FileText className="w-5 h-5 text-black/40" />
+                )}
+                <span className="text-sm font-medium">
+                  {activeDragItem.type === 'folder' 
+                    ? folders.find(f => f.id === activeDragItem.id)?.name 
+                    : articles.find(a => a.id === activeDragItem.id)?.title}
+                </span>
+              </div>
+            </div>
+          ) : null}
+        </DragOverlay>
       </main>
-    </div>
-  );
-}
-
-function ImportPreviewTree({ item, onChange }: { item: any, onChange: (updated: any) => void }) {
-  const [isExpanded, setIsExpanded] = useState(true);
-
-  if (!item) return null;
-
-  const handleNameChange = (newName: string) => {
-    onChange({ ...item, name: newName });
-  };
-
-  const handleChildChange = (index: number, updatedChild: any) => {
-    const newChildren = [...(item.children || [])];
-    newChildren[index] = updatedChild;
-    onChange({ ...item, children: newChildren });
-  };
-
-  if (item.type === 'info') {
-    return (
-      <div className="flex items-center gap-2 py-2 px-3 text-black/40 italic text-sm">
-        <Info className="w-4 h-4" />
-        {item.name}
       </div>
-    );
-  }
-
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-3 group py-1.5 px-3 rounded-xl hover:bg-black/5 transition-colors">
-        {item.type === 'folder' ? (
-          <button 
-            onClick={() => setIsExpanded(!isExpanded)}
-            className={cn("p-0.5 rounded hover:bg-black/10 transition-transform", isExpanded ? "rotate-90" : "")}
-          >
-            <ChevronRight className="w-3 h-3 text-black/40" />
-          </button>
-        ) : (
-          <div className="w-4" />
-        )}
-        
-        {item.type === 'folder' ? (
-          <Folder className="w-4 h-4 text-black/40 shrink-0" />
-        ) : (
-          <FileText className="w-4 h-4 text-black/40 shrink-0" />
-        )}
-
-        <input 
-          type="text"
-          value={item.name}
-          onChange={(e) => handleNameChange(e.target.value)}
-          className="bg-transparent border-none outline-none text-sm font-medium flex-1 focus:ring-1 focus:ring-black/10 rounded px-1 -ml-1 transition-all"
-        />
-        
-        <span className="text-[10px] uppercase font-bold text-black/20 opacity-0 group-hover:opacity-100 transition-opacity">
-          {item.type}
-        </span>
-      </div>
-
-      {item.type === 'folder' && isExpanded && item.children && (
-        <div className="ml-6 border-l border-black/5 pl-2 space-y-1">
-          {item.children.map((child: any, idx: number) => (
-            <ImportPreviewTree 
-              key={idx} 
-              item={child} 
-              onChange={(updated) => handleChildChange(idx, updated)} 
-            />
-          ))}
-        </div>
-      )}
-    </div>
+    </DndContext>
   );
 }
 
@@ -1471,44 +1644,44 @@ function WYSIWYGEditor({ content, onChange }: { content: string, onChange: (html
         <MenuButton 
           onClick={() => editor.chain().focus().toggleBold().run()} 
           isActive={editor.isActive('bold')} 
-          icon={Type} 
+          icon={LucideType} 
           label="Bold" 
         />
         <MenuButton 
           onClick={() => editor.chain().focus().toggleItalic().run()} 
           isActive={editor.isActive('italic')} 
-          icon={Type} 
+          icon={LucideType} 
           label="Italic" 
         />
         <MenuButton 
           onClick={() => editor.chain().focus().toggleUnderline().run()} 
           isActive={editor.isActive('underline')} 
-          icon={Type} 
+          icon={LucideType} 
           label="Underline" 
         />
         <MenuButton 
           onClick={() => editor.chain().focus().toggleStrike().run()} 
           isActive={editor.isActive('strike')} 
-          icon={Type} 
+          icon={LucideType} 
           label="Strike" 
         />
         <div className="w-px h-6 bg-black/5 mx-1 self-center" />
         <MenuButton 
           onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} 
           isActive={editor.isActive('heading', { level: 1 })} 
-          icon={Type} 
+          icon={LucideType} 
           label="H1" 
         />
         <MenuButton 
           onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} 
           isActive={editor.isActive('heading', { level: 2 })} 
-          icon={Type} 
+          icon={LucideType} 
           label="H2" 
         />
         <MenuButton 
           onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()} 
           isActive={editor.isActive('heading', { level: 3 })} 
-          icon={Type} 
+          icon={LucideType} 
           label="H3" 
         />
         <div className="w-px h-6 bg-black/5 mx-1 self-center" />
@@ -1578,28 +1751,742 @@ function WYSIWYGEditor({ content, onChange }: { content: string, onChange: (html
   );
 }
 
+function QuizPlayer({ 
+  quiz, 
+  onClose,
+  onViewArticle
+}: { 
+  quiz: Quiz, 
+  onClose: () => void,
+  onViewArticle: (id: number) => void
+}) {
+  const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
+  const [answers, setAnswers] = useState<number[]>([]);
+  const [isFinished, setIsFinished] = useState(false);
+  const [score, setScore] = useState(0);
+
+  const handleAnswer = async (optionIdx: number) => {
+    const newAnswers = [...answers];
+    newAnswers[currentQuestionIdx] = optionIdx;
+    setAnswers(newAnswers);
+
+    if (currentQuestionIdx < (quiz.questions?.length || 0) - 1) {
+      setCurrentQuestionIdx(currentQuestionIdx + 1);
+    } else {
+      // Calculate score
+      let correct = 0;
+      quiz.questions?.forEach((q, idx) => {
+        if (newAnswers[idx] === q.correct_option_index) correct++;
+      });
+      setScore(correct);
+      setIsFinished(true);
+
+      // Submit results
+      try {
+        const userEmail = 'rowan@creativefabrica.com'; // From context
+        const res = await fetch('/api/initial-data');
+        const data = await res.json();
+        const user = data.users?.find((u: any) => u.email === userEmail);
+        
+        if (user) {
+          await fetch(`/api/quizzes/${quiz.id}/submit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user_id: user.id,
+              score: correct,
+              total_questions: quiz.questions?.length || 0
+            })
+          });
+        }
+      } catch (err) {
+        console.error("Failed to submit quiz results:", err);
+      }
+    }
+  };
+
+  if (isFinished) {
+    return (
+      <div className="flex-1 flex flex-col bg-[#FAFAFA] overflow-y-auto custom-scrollbar">
+        <div className="flex-1 flex items-center justify-center p-8">
+          <motion.div 
+            initial={{ scale: 0.9, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="max-w-2xl w-full bg-white p-12 rounded-[40px] shadow-2xl shadow-black/5 text-center space-y-8"
+          >
+            <div className="w-24 h-24 bg-emerald-50 text-emerald-500 rounded-full flex items-center justify-center mx-auto">
+              <CheckCircle2 className="w-12 h-12" />
+            </div>
+            <div className="space-y-2">
+              <h3 className="text-3xl font-bold">Quiz Complete!</h3>
+              <p className="text-black/40">Great job completing the knowledge check.</p>
+            </div>
+            <div className="bg-[#F5F5F5] p-8 rounded-3xl">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-1">Your Score</p>
+              <p className="text-5xl font-black text-black">
+                {score} <span className="text-2xl text-black/20">/ {quiz.questions?.length}</span>
+              </p>
+            </div>
+
+            <div className="space-y-6 text-left">
+              <h4 className="text-sm font-bold uppercase tracking-widest text-black/20 border-b border-black/5 pb-2">Review & Feedback</h4>
+              <div className="space-y-4">
+                {quiz.questions?.map((q, idx) => {
+                  const isCorrect = answers[idx] === q.correct_option_index;
+                  return (
+                    <div key={idx} className={cn(
+                      "p-6 rounded-3xl border transition-all",
+                      isCorrect ? "bg-emerald-50/30 border-emerald-100" : "bg-red-50/30 border-red-100"
+                    )}>
+                      <div className="flex items-start gap-4">
+                        <div className={cn(
+                          "w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0",
+                          isCorrect ? "bg-emerald-500 text-white" : "bg-red-500 text-white"
+                        )}>
+                          {idx + 1}
+                        </div>
+                        <div className="space-y-3">
+                          <p className="font-bold text-sm">{q.question}</p>
+                          <div className="space-y-1">
+                            <p className="text-xs text-black/40">Your answer: <span className={isCorrect ? "text-emerald-600 font-bold" : "text-red-600 font-bold"}>{q.options[answers[idx]]}</span></p>
+                            {!isCorrect && <p className="text-xs text-black/40">Correct answer: <span className="text-emerald-600 font-bold">{q.options[q.correct_option_index]}</span></p>}
+                          </div>
+                          {(q.feedback || q.article_id) && (
+                            <div className="bg-white/50 p-4 rounded-2xl space-y-2">
+                              {q.feedback && (
+                                <div className="flex gap-2">
+                                  <Info className="w-3.5 h-3.5 text-indigo-500 shrink-0 mt-0.5" />
+                                  <p className="text-xs text-black/60 leading-relaxed">{q.feedback}</p>
+                                </div>
+                              )}
+                              {q.article_id && (
+                                <button 
+                                  onClick={() => onViewArticle(q.article_id!)}
+                                  className="flex items-center gap-1.5 text-[10px] font-bold text-indigo-500 hover:text-indigo-600 uppercase tracking-wider"
+                                >
+                                  <FileText className="w-3 h-3" />
+                                  Read Related Article
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <button 
+              onClick={onClose}
+              className="w-full bg-black text-white py-4 rounded-2xl font-bold hover:bg-black/80 transition-all"
+            >
+              Back to Knowledge Base
+            </button>
+          </motion.div>
+        </div>
+      </div>
+    );
+  }
+
+  const currentQuestion = quiz.questions?.[currentQuestionIdx];
+
+  return (
+    <div className="flex-1 flex flex-col bg-[#FAFAFA] overflow-hidden">
+      <div className="p-8 border-b border-black/5 bg-white flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <button onClick={onClose} className="p-2 hover:bg-black/5 rounded-xl transition-colors">
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <h3 className="font-bold">{quiz.title}</h3>
+            <p className="text-xs text-black/40">Question {currentQuestionIdx + 1} of {quiz.questions?.length}</p>
+          </div>
+        </div>
+        <div className="w-48 h-2 bg-black/5 rounded-full overflow-hidden">
+          <motion.div 
+            className="h-full bg-black"
+            initial={{ width: 0 }}
+            animate={{ width: `${((currentQuestionIdx + 1) / (quiz.questions?.length || 1)) * 100}%` }}
+          />
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-8">
+        <div className="max-w-2xl mx-auto space-y-12 py-12">
+          <motion.div 
+            key={currentQuestionIdx}
+            initial={{ x: 20, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            className="space-y-8"
+          >
+            <h4 className="text-3xl font-bold leading-tight">{currentQuestion?.question}</h4>
+            <div className="grid grid-cols-1 gap-4">
+              {currentQuestion?.options.map((opt, idx) => (
+                <button 
+                  key={idx}
+                  onClick={() => handleAnswer(idx)}
+                  className="group flex items-center gap-6 p-6 bg-white border border-black/5 rounded-3xl hover:border-black/20 hover:shadow-xl hover:shadow-black/[0.02] transition-all text-left"
+                >
+                  <span className="w-10 h-10 rounded-2xl bg-[#F5F5F5] group-hover:bg-black group-hover:text-white flex items-center justify-center font-bold transition-colors">
+                    {String.fromCharCode(65 + idx)}
+                  </span>
+                  <span className="text-lg font-medium text-black/70 group-hover:text-black transition-colors">{opt}</span>
+                </button>
+              ))}
+            </div>
+          </motion.div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuizManager({ 
+  teams, 
+  quizzes, 
+  articles,
+  onUpdateQuizzes,
+  currentUser
+}: { 
+  teams: Team[], 
+  quizzes: Quiz[], 
+  articles: Article[],
+  onUpdateQuizzes: (quizzes: Quiz[]) => void,
+  currentUser: User | null
+}) {
+  const [isCreating, setIsCreating] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [showStats, setShowStats] = useState<number | null>(null);
+  const [quizStats, setQuizStats] = useState<any>(null);
+  const [timeRange, setTimeRange] = useState('7');
+  const [newQuiz, setNewQuiz] = useState<Partial<Quiz>>({
+    title: '',
+    description: '',
+    team_id: null,
+    expires_at: '',
+    status: 'draft',
+    questions: []
+  });
+
+  const fetchStats = async (quizId: number) => {
+    try {
+      const res = await fetch(`/api/quizzes/${quizId}/stats`);
+      if (res.ok) {
+        setQuizStats(await res.json());
+        setShowStats(quizId);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleGenerateQuiz = async () => {
+    if (!currentUser) return;
+    setIsGenerating(true);
+    try {
+      const res = await fetch(`/api/admin/quiz-content?days=${timeRange}`);
+      const content = await res.json();
+      
+      const context = [
+        ...content.articles.map((a: any) => `Article ID: ${a.id}\nTitle: ${a.title}\nContent: ${a.content}`),
+        ...content.announcements.map((a: any) => `Announcement: ${a.message}`)
+      ].join('\n\n');
+
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Based on the following knowledge base updates, generate a 5-question multiple choice quiz. 
+        Return the result as a JSON array of objects, each with:
+        - 'question': the question text
+        - 'options': array of 4 strings
+        - 'correct_option_index': 0-3
+        - 'feedback': a brief explanation of the correct answer
+        - 'article_id': the ID of the article used to generate this question (if applicable, otherwise null)
+        
+        Updates:
+        ${context}`,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                question: { type: Type.STRING },
+                options: { type: Type.ARRAY, items: { type: Type.STRING } },
+                correct_option_index: { type: Type.INTEGER },
+                feedback: { type: Type.STRING },
+                article_id: { type: Type.INTEGER }
+              },
+              required: ["question", "options", "correct_option_index", "feedback"]
+            }
+          }
+        }
+      });
+
+      const generatedQuestions = JSON.parse(response.text || '[]');
+      setNewQuiz({
+        ...newQuiz,
+        title: `Knowledge Check - ${format(new Date(), 'MMM d')}`,
+        description: `A quick quiz based on updates from the last ${timeRange} days.`,
+        questions: generatedQuestions
+      });
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleSaveQuiz = async (status: 'draft' | 'published') => {
+    if (!currentUser || !newQuiz.title) return;
+    try {
+      const res = await fetch('/api/quizzes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...newQuiz, status, created_by: currentUser.id })
+      });
+      if (res.ok) {
+        const { id } = await res.json();
+        if (status === 'published') {
+          // Send notification
+          await fetch('/api/announcements', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              message: `New Quiz Available: ${newQuiz.title}. Please complete it by ${newQuiz.expires_at ? format(parseISO(newQuiz.expires_at), 'MMM d') : 'the deadline'}.`,
+              team_id: newQuiz.team_id,
+              sender_id: currentUser.id
+            })
+          });
+        }
+        const qRes = await fetch('/api/quizzes');
+        if (qRes.ok) onUpdateQuizzes(await qRes.json());
+        setIsCreating(false);
+        setNewQuiz({ title: '', description: '', team_id: null, expires_at: '', status: 'draft', questions: [] });
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDeleteQuiz = async (id: number) => {
+    if (!confirm('Delete this quiz?')) return;
+    try {
+      const res = await fetch(`/api/quizzes/${id}`, { method: 'DELETE' });
+      if (res.ok) onUpdateQuizzes(quizzes.filter(q => q.id !== id));
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-semibold">Quiz Management</h3>
+        {!isCreating && (
+          <button 
+            onClick={() => setIsCreating(true)}
+            className="bg-black text-white px-4 py-2 rounded-xl text-sm font-medium flex items-center gap-2"
+          >
+            <Plus className="w-4 h-4" />
+            Create New Quiz
+          </button>
+        )}
+      </div>
+
+      {isCreating ? (
+        <div className="bg-white p-8 rounded-3xl border border-black/5 shadow-sm space-y-8">
+          <div className="flex justify-between items-start">
+            <div className="space-y-1">
+              <h4 className="text-xl font-bold">Create Knowledge Quiz</h4>
+              <p className="text-sm text-black/40">Generate a quiz from recent updates or create one manually.</p>
+            </div>
+            <button onClick={() => setIsCreating(false)} className="text-black/20 hover:text-black">
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-3 gap-6">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-wider text-black/40">Time Period</label>
+              <div className="flex gap-2">
+                <select 
+                  className="flex-1 bg-[#F5F5F5] border-none rounded-xl px-4 py-3 text-sm outline-none"
+                  value={timeRange}
+                  onChange={e => setTimeRange(e.target.value)}
+                >
+                  <option value="7">Last 7 Days</option>
+                  <option value="30">Last Month</option>
+                  <option value="90">Last 3 Months</option>
+                </select>
+                <button 
+                  onClick={handleGenerateQuiz}
+                  disabled={isGenerating}
+                  className="bg-indigo-500 text-white px-4 py-3 rounded-xl text-sm font-medium flex items-center gap-2 hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                >
+                  {isGenerating ? <Sparkles className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  AI Generate
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-wider text-black/40">Target Group</label>
+              <select 
+                className="w-full bg-[#F5F5F5] border-none rounded-xl px-4 py-3 text-sm outline-none"
+                value={newQuiz.team_id || ''}
+                onChange={e => setNewQuiz({...newQuiz, team_id: e.target.value ? parseInt(e.target.value) : null})}
+              >
+                <option value="">All Users</option>
+                {teams.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold uppercase tracking-wider text-black/40">Completion Deadline</label>
+              <input 
+                type="date"
+                className="w-full bg-[#F5F5F5] border-none rounded-xl px-4 py-3 text-sm outline-none"
+                value={newQuiz.expires_at || ''}
+                onChange={e => setNewQuiz({...newQuiz, expires_at: e.target.value})}
+              />
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <input 
+              placeholder="Quiz Title"
+              className="w-full text-2xl font-bold bg-transparent border-none outline-none placeholder:text-black/10"
+              value={newQuiz.title}
+              onChange={e => setNewQuiz({...newQuiz, title: e.target.value})}
+            />
+            <textarea 
+              placeholder="Quiz Description"
+              className="w-full bg-[#F5F5F5] border-none rounded-xl px-4 py-3 text-sm outline-none resize-none h-20"
+              value={newQuiz.description}
+              onChange={e => setNewQuiz({...newQuiz, description: e.target.value})}
+            />
+          </div>
+
+          <div className="space-y-6">
+            <div className="flex items-center justify-between border-b border-black/5 pb-2">
+              <h5 className="text-sm font-bold uppercase tracking-wider text-black/40">Questions ({newQuiz.questions?.length || 0})</h5>
+              <button 
+                onClick={() => setNewQuiz({
+                  ...newQuiz, 
+                  questions: [...(newQuiz.questions || []), { question: '', options: ['', '', '', ''], correct_option_index: 0 }]
+                })}
+                className="text-xs font-bold text-indigo-500 hover:text-indigo-600 flex items-center gap-1"
+              >
+                <Plus className="w-3 h-3" /> Add Question
+              </button>
+            </div>
+
+            <div className="space-y-8">
+              {newQuiz.questions?.map((q, qIdx) => (
+                <div key={qIdx} className="space-y-4 p-6 bg-[#F5F5F5] rounded-2xl relative group">
+                  <button 
+                    onClick={() => setNewQuiz({
+                      ...newQuiz,
+                      questions: newQuiz.questions?.filter((_, i) => i !== qIdx)
+                    })}
+                    className="absolute top-4 right-4 text-black/10 hover:text-red-500 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                  <div className="flex gap-4">
+                    <span className="w-8 h-8 bg-black text-white rounded-full flex items-center justify-center text-xs font-bold shrink-0">{qIdx + 1}</span>
+                    <input 
+                      placeholder="Enter question..."
+                      className="flex-1 bg-transparent border-none font-semibold outline-none"
+                      value={q.question}
+                      onChange={e => {
+                        const qs = [...(newQuiz.questions || [])];
+                        qs[qIdx].question = e.target.value;
+                        setNewQuiz({...newQuiz, questions: qs});
+                      }}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 pl-12">
+                    {q.options.map((opt, oIdx) => (
+                      <div key={oIdx} className="flex items-center gap-3">
+                        <button 
+                          onClick={() => {
+                            const qs = [...(newQuiz.questions || [])];
+                            qs[qIdx].correct_option_index = oIdx;
+                            setNewQuiz({...newQuiz, questions: qs});
+                          }}
+                          className={cn(
+                            "w-5 h-5 rounded-full border flex items-center justify-center transition-all",
+                            q.correct_option_index === oIdx ? "bg-emerald-500 border-emerald-500 text-white" : "border-black/10 hover:border-black/30"
+                          )}
+                        >
+                          {q.correct_option_index === oIdx && <CheckCircle2 className="w-3 h-3" />}
+                        </button>
+                        <input 
+                          placeholder={`Option ${oIdx + 1}`}
+                          className="flex-1 bg-white border border-black/5 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500/20"
+                          value={opt}
+                          onChange={e => {
+                            const qs = [...(newQuiz.questions || [])];
+                            qs[qIdx].options[oIdx] = e.target.value;
+                            setNewQuiz({...newQuiz, questions: qs});
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="pl-12 space-y-3">
+                    <div className="flex gap-3">
+                      <div className="flex-1 space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-black/30">Feedback for this question</label>
+                        <textarea 
+                          placeholder="Explain why the answer is correct..."
+                          className="w-full bg-white border border-black/5 rounded-xl px-4 py-2 text-xs outline-none focus:ring-2 focus:ring-indigo-500/20 resize-none h-16"
+                          value={q.feedback || ''}
+                          onChange={e => {
+                            const qs = [...(newQuiz.questions || [])];
+                            qs[qIdx].feedback = e.target.value;
+                            setNewQuiz({...newQuiz, questions: qs});
+                          }}
+                        />
+                      </div>
+                      <div className="w-64 space-y-1">
+                        <label className="text-[10px] font-bold uppercase tracking-wider text-black/30">Link to Article</label>
+                        <select 
+                          className="w-full bg-white border border-black/5 rounded-xl px-4 py-2 text-xs outline-none focus:ring-2 focus:ring-indigo-500/20"
+                          value={q.article_id || ''}
+                          onChange={e => {
+                            const qs = [...(newQuiz.questions || [])];
+                            qs[qIdx].article_id = e.target.value ? parseInt(e.target.value) : null;
+                            setNewQuiz({...newQuiz, questions: qs});
+                          }}
+                        >
+                          <option value="">No Article Link</option>
+                          {articles.map(a => <option key={a.id} value={a.id}>{a.title}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-3 pt-6 border-t border-black/5">
+            <button 
+              onClick={() => setIsCreating(false)}
+              className="px-6 py-3 rounded-xl text-sm font-medium border border-black/10 hover:bg-black/5 transition-colors"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={() => handleSaveQuiz('draft')}
+              className="px-6 py-3 rounded-xl text-sm font-medium bg-[#F5F5F5] hover:bg-black/5 transition-colors"
+            >
+              Save as Draft
+            </button>
+            <button 
+              onClick={() => handleSaveQuiz('published')}
+              className="px-8 py-3 rounded-xl text-sm font-medium bg-black text-white hover:bg-black/80 transition-all shadow-lg shadow-black/10 flex items-center gap-2"
+            >
+              <Send className="w-4 h-4" />
+              Publish & Notify
+            </button>
+          </div>
+        </div>
+      ) : showStats && quizStats ? (
+        <div className="bg-white p-8 rounded-3xl border border-black/5 shadow-sm space-y-8">
+          <div className="flex justify-between items-start">
+            <div className="space-y-1">
+              <h4 className="text-xl font-bold">Quiz Performance: {quizzes.find(q => q.id === showStats)?.title}</h4>
+              <p className="text-sm text-black/40">Detailed breakdown of submissions and team performance.</p>
+            </div>
+            <button onClick={() => setShowStats(null)} className="text-black/20 hover:text-black">
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-4 gap-6">
+            <div className="bg-[#F5F5F5] p-6 rounded-3xl">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-1">Average Score</p>
+              <p className="text-3xl font-black text-black">{Math.round(quizStats.averageScore)}%</p>
+            </div>
+            <div className="bg-[#F5F5F5] p-6 rounded-3xl">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-1">Submissions</p>
+              <p className="text-3xl font-black text-black">{quizStats.submissions.length}</p>
+            </div>
+            <div className="bg-[#F5F5F5] p-6 rounded-3xl">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-1">Pending</p>
+              <p className="text-3xl font-black text-black">{quizStats.pendingUsers.length}</p>
+            </div>
+            <div className="bg-[#F5F5F5] p-6 rounded-3xl">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-black/40 mb-1">Team Avg</p>
+              <p className="text-3xl font-black text-black">{quizStats.teamAverages.length > 0 ? Math.round(quizStats.teamAverages[0].average) : 0}%</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-8">
+            <div className="space-y-4">
+              <h5 className="text-sm font-bold uppercase tracking-widest text-black/20 border-b border-black/5 pb-2">Scoreboard</h5>
+              <div className="space-y-2">
+                {quizStats.submissions.map((s: any) => (
+                  <div key={s.id} className="flex items-center justify-between p-4 bg-[#F5F5F5] rounded-2xl">
+                    <div>
+                      <p className="font-bold text-sm">{s.user_name}</p>
+                      <p className="text-[10px] text-black/40 uppercase font-bold">{s.team_name || 'No Team'}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-black text-lg">{Math.round((s.score / s.total_questions) * 100)}%</p>
+                      <p className="text-[10px] text-black/40">{format(parseISO(s.submitted_at), 'MMM d, HH:mm')}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-8">
+              <div className="space-y-4">
+                <h5 className="text-sm font-bold uppercase tracking-widest text-black/20 border-b border-black/5 pb-2">Pending Submissions</h5>
+                <div className="space-y-2">
+                  {quizStats.pendingUsers.map((u: any) => {
+                    const quiz = quizzes.find(q => q.id === showStats);
+                    const isExpired = quiz?.expires_at && isPast(parseISO(quiz.expires_at));
+                    return (
+                      <div key={u.id} className="flex items-center justify-between p-4 bg-[#F5F5F5] rounded-2xl">
+                        <div>
+                          <p className="font-bold text-sm">{u.name}</p>
+                          <p className="text-[10px] text-black/40">{u.email}</p>
+                        </div>
+                        {isExpired ? (
+                          <span className="bg-red-50 text-red-600 px-2 py-1 rounded text-[10px] font-bold uppercase">Expired</span>
+                        ) : (
+                          <span className="bg-amber-50 text-amber-600 px-2 py-1 rounded text-[10px] font-bold uppercase">Pending</span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <h5 className="text-sm font-bold uppercase tracking-widest text-black/20 border-b border-black/5 pb-2">Team Averages</h5>
+                <div className="space-y-2">
+                  {quizStats.teamAverages.map((t: any, idx: number) => (
+                    <div key={idx} className="flex items-center justify-between p-4 bg-[#F5F5F5] rounded-2xl">
+                      <p className="font-bold text-sm">{t.team_name}</p>
+                      <p className="font-black text-lg">{Math.round(t.average)}%</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4">
+          {quizzes.length === 0 ? (
+            <div className="text-center py-20 bg-white rounded-3xl border border-black/5">
+              <Brain className="w-12 h-12 text-black/5 mx-auto mb-4" />
+              <p className="text-black/40">No quizzes created yet.</p>
+            </div>
+          ) : (
+            quizzes.map(quiz => (
+              <div key={quiz.id} className="bg-white p-6 rounded-2xl border border-black/5 shadow-sm flex items-center justify-between group hover:border-black/10 transition-all">
+                <div className="flex items-center gap-4">
+                  <div className={cn(
+                    "w-12 h-12 rounded-xl flex items-center justify-center",
+                    quiz.status === 'published' ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"
+                  )}>
+                    <Brain className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h4 className="font-semibold">{quiz.title}</h4>
+                    <div className="flex items-center gap-3 text-xs text-black/40 mt-1">
+                      <span className="flex items-center gap-1">
+                        <Users className="w-3 h-3" />
+                        {quiz.team_name || 'All Users'}
+                      </span>
+                      <span>•</span>
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-3 h-3" />
+                        {format(parseISO(quiz.created_at), 'MMM d, yyyy')}
+                      </span>
+                      {quiz.expires_at && (
+                        <>
+                          <span>•</span>
+                          <span className={cn(
+                            "flex items-center gap-1",
+                            isPast(parseISO(quiz.expires_at)) ? "text-red-500 font-bold" : ""
+                          )}>
+                            <Clock className="w-3 h-3" />
+                            Due {format(parseISO(quiz.expires_at), 'MMM d')}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className={cn(
+                    "px-2 py-1 rounded text-[10px] font-bold uppercase",
+                    quiz.status === 'published' ? "bg-emerald-50 text-emerald-600" : "bg-amber-50 text-amber-600"
+                  )}>
+                    {quiz.status}
+                  </span>
+                  {quiz.status === 'published' && (
+                    <button 
+                      onClick={() => fetchStats(quiz.id)}
+                      className="p-2 text-black/10 hover:text-indigo-500 transition-colors"
+                    >
+                      <List className="w-4 h-4" />
+                    </button>
+                  )}
+                  <button 
+                    onClick={() => handleDeleteQuiz(quiz.id)}
+                    className="p-2 text-black/10 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AdminPanel({ 
   users, 
   teams, 
   folders, 
   articles,
   folderAccess, 
+  quizzes,
   onUpdateUsers, 
   onUpdateTeams, 
   onUpdateFolderAccess,
-  onUpdateArticles
+  onUpdateArticles,
+  onUpdateQuizzes,
+  currentUser
 }: { 
   users: User[], 
   teams: Team[], 
   folders: FolderType[], 
   articles: Article[],
   folderAccess: FolderAccess[],
+  quizzes: Quiz[],
   onUpdateUsers: (users: User[]) => void,
   onUpdateTeams: (teams: Team[]) => void,
   onUpdateFolderAccess: (access: FolderAccess[]) => void,
-  onUpdateArticles: (articles: Article[]) => void
+  onUpdateArticles: (articles: Article[]) => void,
+  onUpdateQuizzes: (quizzes: Quiz[]) => void,
+  currentUser: User | null
 }) {
-  const [activeTab, setActiveTab] = useState<'users' | 'groups' | 'folders' | 'articles'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'groups' | 'folders' | 'articles' | 'quizzes'>('users');
   const [isAddingUser, setIsAddingUser] = useState(false);
   const [isAddingTeam, setIsAddingTeam] = useState(false);
   const [newUser, setNewUser] = useState<Partial<User>>({ role: 'viewer' });
@@ -1732,7 +2619,8 @@ function AdminPanel({
           { id: 'users', label: 'Users', icon: Users },
           { id: 'groups', label: 'Groups', icon: Shield },
           { id: 'folders', label: 'Folder Permissions', icon: Lock },
-          { id: 'articles', label: 'Article Manager', icon: FileText }
+          { id: 'articles', label: 'Article Manager', icon: FileText },
+          { id: 'quizzes', label: 'Quizzes', icon: Brain }
         ].map(tab => (
           <button
             key={tab.id}
@@ -2066,6 +2954,16 @@ function AdminPanel({
               </div>
             </div>
           )}
+
+          {activeTab === 'quizzes' && (
+            <QuizManager 
+              teams={teams} 
+              quizzes={quizzes} 
+              articles={articles}
+              onUpdateQuizzes={onUpdateQuizzes}
+              currentUser={currentUser}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -2074,133 +2972,4 @@ function AdminPanel({
 
 // --- Sub-components ---
 
-function FolderTree({ 
-  folders, 
-  selectedId, 
-  onSelect, 
-  onDrop,
-  expandedIds,
-  onToggleExpand,
-  editingId,
-  onRename,
-  onStartRename,
-  onDelete,
-  editValue,
-  onEditChange,
-  parentId = null, 
-  level = 0 
-}: { 
-  folders: FolderType[], 
-  selectedId: number | null, 
-  onSelect: (id: number | null) => void,
-  onDrop: (e: React.DragEvent, folderId: number | null) => void,
-  expandedIds: number[],
-  onToggleExpand: (e: React.MouseEvent, id: number) => void,
-  editingId: number | null,
-  onRename: (id: number) => void,
-  onStartRename: (id: number, name: string) => void,
-  onDelete: (id: number) => void,
-  editValue: string,
-  onEditChange: (val: string) => void,
-  parentId?: number | null,
-  level?: number
-}) {
-  const currentFolders = folders.filter(f => f.parent_id === parentId);
-  
-  if (currentFolders.length === 0 && level > 0) return null;
 
-  return (
-    <div className="space-y-0.5">
-      {currentFolders.map(folder => {
-        const hasChildren = folders.some(f => f.parent_id === folder.id);
-        const isExpanded = expandedIds.includes(folder.id);
-
-        return (
-          <div key={folder.id}>
-            <div
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData('type', 'folder');
-                e.dataTransfer.setData('folderId', folder.id.toString());
-              }}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => onDrop(e, folder.id)}
-              className={cn(
-                "w-full flex items-center justify-between group px-3 py-2 rounded-xl text-sm font-medium transition-colors cursor-pointer",
-                selectedId === folder.id ? "bg-black text-white" : "hover:bg-black/5"
-              )}
-              style={{ paddingLeft: `${(level + 1) * 12}px` }}
-              onClick={() => onSelect(folder.id)}
-            >
-              <div className="flex items-center gap-2 flex-1 min-w-0">
-                <div className="flex items-center gap-1">
-                  {hasChildren ? (
-                    <button 
-                      onClick={(e) => onToggleExpand(e, folder.id)}
-                      className={cn(
-                        "p-0.5 rounded hover:bg-black/10 transition-transform",
-                        isExpanded ? "rotate-90" : ""
-                      )}
-                    >
-                      <ChevronRight className={cn("w-3 h-3", selectedId === folder.id ? "text-white" : "text-black/40")} />
-                    </button>
-                  ) : (
-                    <div className="w-4" />
-                  )}
-                  <Folder className={cn("w-4 h-4 shrink-0", selectedId === folder.id ? "text-white" : "text-black/40")} />
-                </div>
-                {editingId === folder.id ? (
-                  <input 
-                    autoFocus
-                    className="bg-transparent border-b border-white/20 outline-none w-full"
-                    value={editValue}
-                    onChange={(e) => onEditChange(e.target.value)}
-                    onBlur={() => onRename(folder.id)}
-                    onKeyDown={(e) => e.key === 'Enter' && onRename(folder.id)}
-                    onClick={(e) => e.stopPropagation()}
-                  />
-                ) : (
-                  <span className="truncate">{folder.name}</span>
-                )}
-              </div>
-              {!editingId && (
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); onStartRename(folder.id, folder.name); }}
-                    className="p-1 hover:bg-white/10 rounded transition-all"
-                  >
-                    <Edit3 className="w-3 h-3" />
-                  </button>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); onDelete(folder.id); }}
-                    className="p-1 hover:bg-red-500/20 text-red-400 hover:text-red-500 rounded transition-all"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </div>
-              )}
-            </div>
-            {isExpanded && (
-              <FolderTree 
-                folders={folders} 
-                selectedId={selectedId} 
-                onSelect={onSelect} 
-                onDrop={onDrop}
-                expandedIds={expandedIds}
-                onToggleExpand={onToggleExpand}
-                editingId={editingId}
-                onRename={onRename}
-                onStartRename={onStartRename}
-                onDelete={onDelete}
-                editValue={editValue}
-                onEditChange={onEditChange}
-                parentId={folder.id} 
-                level={level + 1} 
-              />
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}

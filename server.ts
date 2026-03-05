@@ -76,6 +76,42 @@ db.exec(`
     FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS quizzes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    description TEXT,
+    team_id INTEGER, -- Target team, NULL for all
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME,
+    created_by INTEGER,
+    status TEXT DEFAULT 'draft', -- 'draft', 'published'
+    FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL,
+    FOREIGN KEY (created_by) REFERENCES users(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS quiz_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    quiz_id INTEGER,
+    question TEXT NOT NULL,
+    options TEXT NOT NULL, -- JSON array of strings
+    correct_option_index INTEGER NOT NULL,
+    feedback TEXT,
+    article_id INTEGER,
+    FOREIGN KEY (quiz_id) REFERENCES quizzes(id) ON DELETE CASCADE,
+    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS quiz_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    quiz_id INTEGER,
+    user_id INTEGER,
+    score INTEGER NOT NULL,
+    total_questions INTEGER NOT NULL,
+    submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (quiz_id) REFERENCES quizzes(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
   -- Seed some initial data if empty
   INSERT OR IGNORE INTO teams (name) VALUES ('General'), ('Technical Support'), ('Billing'), ('Onboarding'), ('Line 1'), ('Line 2'), ('Line 3');
   INSERT OR IGNORE INTO users (name, email, team_id, role) VALUES ('Admin User', 'admin@supporthub.com', 1, 'admin');
@@ -116,233 +152,7 @@ async function startServer() {
     next();
   });
 
-  // Import Preview Route
-  app.post("/api/import/preview", upload.single("file"), async (req: any, res) => {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-    
-    const filePath = req.file.path;
-    const fileName = req.file.originalname;
-    const extension = path.extname(fileName).toLowerCase();
-
-    if (extension !== ".zip") {
-      // For single files, show a simple preview
-      return res.json({
-        tempId: req.file.filename,
-        structure: {
-          name: fileName.replace(extension, ""),
-          type: 'article',
-          content: 'Single file import',
-          extension
-        }
-      });
-    }
-
-    try {
-      const zip = new AdmZip(filePath);
-      const zipEntries = zip.getEntries();
-      const zipName = fileName.replace(/\.zip$/i, "");
-      
-      let structure: any = {
-        name: zipName,
-        type: 'folder',
-        children: []
-      };
-
-      const jsonEntry = zipEntries.find(entry => entry.entryName.endsWith(".json") && !entry.isDirectory);
-      if (jsonEntry) {
-        try {
-          const jsonData = JSON.parse(jsonEntry.getData().toString('utf8'));
-          const normalize = (data: any): any => {
-            if (Array.isArray(data)) return data.map(normalize);
-            if (typeof data === 'object' && data !== null) {
-               const name = data.name || data.title || data.folder_name || "Untitled";
-               const children = (data.children || data.folders || data.subfolders || []).map(normalize);
-               const articles = (data.articles || []).map((a: any) => ({
-                 name: a.title || a.name || "Untitled Article",
-                 type: 'article',
-                 content: a.content || a.body || "",
-                 tags: Array.isArray(a.tags) ? a.tags.join(",") : (a.tags || "")
-               }));
-               return { name, type: 'folder', children: [...children, ...articles] };
-            }
-            return { name: String(data), type: 'folder', children: [] };
-          };
-          const normalized = Array.isArray(jsonData) ? jsonData.map(normalize) : [normalize(jsonData)];
-          structure.children = normalized;
-        } catch (e) {
-          console.error("JSON parse error in preview:", e);
-        }
-      } else {
-        // Legacy detection for preview
-        const cardsEntry = zipEntries.find(e => e.entryName.startsWith("cards/") && e.isDirectory);
-        if (cardsEntry) {
-          structure.children.push({ name: "Legacy Knowledge Base Structure", type: 'folder', children: [] });
-        } else {
-          // Just list files if nothing else
-          zipEntries.filter(e => !e.isDirectory).slice(0, 20).forEach(e => {
-            structure.children.push({ name: e.entryName, type: 'article' });
-          });
-        }
-      }
-
-      res.json({
-        tempId: req.file.filename,
-        structure
-      });
-    } catch (err) {
-      console.error("ZIP preview error:", err);
-      res.status(500).json({ error: "Failed to parse ZIP" });
-    }
-  });
-
-  // Import Confirm Route
-  app.post("/api/import/confirm", async (req, res) => {
-    const { tempId, structure, folderId } = req.body;
-    const filePath = path.join("uploads", tempId);
-    
-    if (!fs.existsSync(filePath)) {
-      return res.status(400).json({ error: "Upload session expired or file not found" });
-    }
-
-    try {
-      const importStructure = (item: any, parent: number | null) => {
-        if (item.type === 'folder') {
-          const res = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(item.name, parent);
-          const newId = res.lastInsertRowid as number;
-          if (item.children) {
-            item.children.forEach((child: any) => importStructure(child, newId));
-          }
-        } else if (item.type === 'article') {
-          db.prepare("INSERT INTO articles (title, content, tags, folder_id) VALUES (?, ?, ?, ?)")
-            .run(item.name, item.content || "", item.tags || "", parent);
-        }
-      };
-
-      const isZip = tempId.toLowerCase().endsWith(".zip") || structure.extension === ".zip";
-      // Actually, multer saves files without extensions sometimes depending on config, 
-      // but here we can check the original filename if we stored it, or just try AdmZip.
-      
-      let zip: any = null;
-      try {
-        zip = new AdmZip(filePath);
-      } catch (e) {
-        // Not a ZIP
-      }
-
-      if (zip) {
-        const zipEntries = zip.getEntries();
-        const jsonEntry = zipEntries.find(entry => entry.entryName.endsWith(".json") && !entry.isDirectory);
-
-        if (jsonEntry) {
-          // Use the structure provided by the user (which might have renames)
-          importStructure(structure, folderId);
-        } else {
-          // Fallback to the original ZIP logic if it was a legacy structure
-          const rootFolderResult = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(structure.name, folderId);
-          const rootFolderId = rootFolderResult.lastInsertRowid as number;
-
-          const tempDir = path.join("uploads", `extract_${Date.now()}`);
-          fs.mkdirSync(tempDir, { recursive: true });
-          zip.extractAllTo(tempDir, true);
-
-          const cardsDir = path.join(tempDir, "cards");
-          const resourcesDir = path.join(tempDir, "resources");
-          const foldersDir = path.join(tempDir, "folders");
-
-          const publicResourcesDir = path.join("public", "resources");
-          if (!fs.existsSync(publicResourcesDir)) fs.mkdirSync(publicResourcesDir, { recursive: true });
-          if (fs.existsSync(resourcesDir)) {
-            const resourceFiles = fs.readdirSync(resourcesDir);
-            for (const resFile of resourceFiles) {
-              fs.copyFileSync(path.join(resourcesDir, resFile), path.join(publicResourcesDir, resFile));
-            }
-          }
-
-          const articleMap = new Map<string, number>();
-          if (fs.existsSync(cardsDir)) {
-            const cardFiles = fs.readdirSync(cardsDir);
-            const yamlFiles = cardFiles.filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
-            for (const yamlFile of yamlFiles) {
-              try {
-                const yamlContent = fs.readFileSync(path.join(cardsDir, yamlFile), "utf8");
-                const yamlData = yaml.load(yamlContent) as any;
-                if (!yamlData) continue;
-                const title = yamlData.Title || yamlData.title || yamlFile.replace(/\.ya?ml$/, "");
-                const externalId = yamlData.ExternalId || yamlData.id;
-                if (!externalId) continue;
-                const htmlPath = path.join(cardsDir, `${externalId}.html`);
-                if (!fs.existsSync(htmlPath)) continue;
-                let tagsArr: string[] = [];
-                const rawTags = yamlData.Tags || yamlData.tags;
-                if (Array.isArray(rawTags)) tagsArr = rawTags.map((t: string) => t.replace(/^Support Tags:/i, "").toLowerCase().trim());
-                const htmlContent = fs.readFileSync(htmlPath, "utf8");
-                const updatedHtml = htmlContent.replace(/src=["']resources\/(.*?)["']/g, 'src="/resources/$1"');
-                const markdownContent = NodeHtmlMarkdown.translate(updatedHtml);
-                const result = db.prepare("INSERT INTO articles (title, content, tags, folder_id) VALUES (?, ?, ?, ?)").run(title, markdownContent, tagsArr.join(","), rootFolderId);
-                articleMap.set(externalId.toString(), result.lastInsertRowid as number);
-              } catch (e) {}
-            }
-          }
-
-          if (fs.existsSync(foldersDir)) {
-            const folderFiles = fs.readdirSync(foldersDir);
-            for (const fFile of folderFiles) {
-              if (fFile.endsWith(".yaml") || fFile.endsWith(".yml")) {
-                try {
-                  const fContent = fs.readFileSync(path.join(foldersDir, fFile), "utf8");
-                  const fData = yaml.load(fContent) as any;
-                  const fTitle = fData.Title || fData.title || fFile.replace(/\.ya?ml$/, "");
-                  const folderResult = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(fTitle, rootFolderId);
-                  const newFolderId = folderResult.lastInsertRowid;
-                  const fArticles = fData.Articles || fData.articles;
-                  if (fArticles && Array.isArray(fArticles)) {
-                    for (const artZipId of fArticles) {
-                      const dbId = articleMap.get(artZipId.toString());
-                      if (dbId) db.prepare("UPDATE articles SET folder_id = ? WHERE id = ?").run(newFolderId, dbId);
-                    }
-                  }
-                } catch (e) {}
-              }
-            }
-          }
-          fs.rmSync(tempDir, { recursive: true, force: true });
-        }
-      } else {
-        // Single file import
-        const extension = structure.extension || path.extname(tempId).toLowerCase();
-        let content = "";
-        let tags = "";
-
-        if (extension === ".pdf") {
-          const dataBuffer = fs.readFileSync(filePath);
-          const data = await pdf(dataBuffer);
-          content = data.text;
-        } else if (extension === ".html" || extension === ".htm") {
-          const fileContents = fs.readFileSync(filePath, "utf8");
-          content = NodeHtmlMarkdown.translate(fileContents);
-        } else if (extension === ".yaml" || extension === ".yml") {
-          const fileContents = fs.readFileSync(filePath, "utf8");
-          const data = yaml.load(fileContents) as any;
-          content = data.content || JSON.stringify(data, null, 2);
-          tags = Array.isArray(data.tags) ? data.tags.join(",") : (data.tags || "");
-        } else {
-          content = fs.readFileSync(filePath, "utf8");
-        }
-
-        db.prepare("INSERT INTO articles (title, content, tags, folder_id) VALUES (?, ?, ?, ?)")
-          .run(structure.name, content, tags, folderId);
-      }
-
-      res.json({ success: true });
-    } catch (err) {
-      console.error("Confirm import error:", err);
-      res.status(500).json({ error: "Import failed" });
-    } finally {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    }
-  });
-
-  // Import Route (Batch & ZIP) - Keep as fallback or for single files
+  // Import Route (Batch & ZIP)
   app.post(["/api/import", "/api/import/"], (req, res, next) => {
     console.log(`[${new Date().toISOString()}] POST /api/import - Start`);
     upload.array("files")(req, res, (err: any) => {
@@ -376,161 +186,110 @@ async function startServer() {
         if (extension === ".zip") {
           const zip = new AdmZip(filePath);
           const zipEntries = zip.getEntries();
-          
-          // 1. Create a top-level folder for the ZIP
-          const zipName = fileName.replace(/\.zip$/i, "");
-          const rootFolderResult = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(zipName, folderId);
-          const rootFolderId = rootFolderResult.lastInsertRowid as number;
-          
-          // Check for a .json file that defines the structure
-          const jsonEntry = zipEntries.find(entry => entry.entryName.endsWith(".json") && !entry.isDirectory);
-          
-          if (jsonEntry) {
-            try {
-              const jsonData = JSON.parse(jsonEntry.getData().toString('utf8'));
-              
-              const createStructure = (data: any, parent: number) => {
-                if (Array.isArray(data)) {
-                  data.forEach(item => createStructure(item, parent));
-                } else if (typeof data === 'object' && data !== null) {
-                  const name = data.name || data.title || data.folder_name;
-                  if (name) {
-                    const res = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(name, parent);
-                    const newId = res.lastInsertRowid as number;
-                    
-                    const children = data.children || data.folders || data.subfolders;
-                    if (Array.isArray(children)) {
-                      createStructure(children, newId);
-                    }
-                    
-                    const articles = data.articles;
-                    if (Array.isArray(articles)) {
-                      articles.forEach((art: any) => {
-                        const aTitle = art.title || art.name || "Untitled Article";
-                        const aContent = art.content || art.body || "";
-                        const aTags = Array.isArray(art.tags) ? art.tags.join(",") : (art.tags || "");
-                        db.prepare("INSERT INTO articles (title, content, tags, folder_id) VALUES (?, ?, ?, ?)").run(aTitle, aContent, aTags, newId);
-                      });
-                    }
-                  }
-                } else if (typeof data === 'string') {
-                  db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(data, parent);
-                }
-              };
-              
-              createStructure(jsonData, rootFolderId);
-              results.push({ title: zipName, success: true, message: "Imported structure from JSON" });
-            } catch (err) {
-              console.error("JSON parse error:", err);
-              results.push({ fileName, error: "Failed to parse JSON structure" });
+          const tempDir = path.join("uploads", `extract_${Date.now()}`);
+          fs.mkdirSync(tempDir, { recursive: true });
+          zip.extractAllTo(tempDir, true);
+
+          const cardsDir = path.join(tempDir, "cards");
+          const resourcesDir = path.join(tempDir, "resources");
+          const foldersDir = path.join(tempDir, "folders");
+
+          // 1. Handle Resources
+          const publicResourcesDir = path.join("public", "resources");
+          if (!fs.existsSync(publicResourcesDir)) fs.mkdirSync(publicResourcesDir, { recursive: true });
+          if (fs.existsSync(resourcesDir)) {
+            const resourceFiles = fs.readdirSync(resourcesDir);
+            for (const resFile of resourceFiles) {
+              fs.copyFileSync(path.join(resourcesDir, resFile), path.join(publicResourcesDir, resFile));
             }
-          } else {
-            // Fallback to existing logic but use rootFolderId as the parent
-            const tempDir = path.join("uploads", `extract_${Date.now()}`);
-            fs.mkdirSync(tempDir, { recursive: true });
-            zip.extractAllTo(tempDir, true);
-
-            const cardsDir = path.join(tempDir, "cards");
-            const resourcesDir = path.join(tempDir, "resources");
-            const foldersDir = path.join(tempDir, "folders");
-
-            // 1. Handle Resources
-            const publicResourcesDir = path.join("public", "resources");
-            if (!fs.existsSync(publicResourcesDir)) fs.mkdirSync(publicResourcesDir, { recursive: true });
-            if (fs.existsSync(resourcesDir)) {
-              const resourceFiles = fs.readdirSync(resourcesDir);
-              for (const resFile of resourceFiles) {
-                fs.copyFileSync(path.join(resourcesDir, resFile), path.join(publicResourcesDir, resFile));
-              }
-            }
-
-            // 2. Handle Cards (Articles)
-            const articleMap = new Map<string, number>(); // Map ZIP ID to DB ID
-            if (fs.existsSync(cardsDir)) {
-              const cardFiles = fs.readdirSync(cardsDir);
-              const yamlFiles = cardFiles.filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
-
-              for (const yamlFile of yamlFiles) {
-                const yamlPath = path.join(cardsDir, yamlFile);
-                try {
-                  const yamlContent = fs.readFileSync(yamlPath, "utf8");
-                  const yamlData = yaml.load(yamlContent) as any;
-                  
-                  if (!yamlData) continue;
-
-                  const title = yamlData.Title || yamlData.title || yamlFile.replace(/\.ya?ml$/, "");
-                  const externalId = yamlData.ExternalId || yamlData.id;
-                  
-                  if (!externalId) {
-                    console.warn(`No ExternalId found in ${yamlFile}`);
-                    continue;
-                  }
-
-                  const htmlFile = `${externalId}.html`;
-                  const htmlPath = path.join(cardsDir, htmlFile);
-
-                  if (!fs.existsSync(htmlPath)) {
-                    console.warn(`HTML file not found for ExternalId: ${externalId} (referenced in ${yamlFile})`);
-                    continue;
-                  }
-
-                  let tagsArr: string[] = [];
-                  const rawTags = yamlData.Tags || yamlData.tags;
-                  if (Array.isArray(rawTags)) {
-                    tagsArr = rawTags.map((t: string) => 
-                      t.replace(/^Support Tags:/i, "").toLowerCase().trim()
-                    );
-                  }
-                  const tags = tagsArr.join(",");
-
-                  const htmlContent = fs.readFileSync(htmlPath, "utf8");
-                  // Update resource paths in HTML if needed
-                  const updatedHtml = htmlContent.replace(/src=["']resources\/(.*?)["']/g, 'src="/resources/$1"');
-                  const markdownContent = NodeHtmlMarkdown.translate(updatedHtml);
-
-                  const result = db.prepare(`
-                    INSERT INTO articles (title, content, tags, folder_id)
-                    VALUES (?, ?, ?, ?)
-                  `).run(title, markdownContent, tags, rootFolderId);
-
-                  articleMap.set(externalId.toString(), result.lastInsertRowid as number);
-                  results.push({ title, success: true });
-                } catch (err) {
-                  console.error(`Error processing YAML ${yamlFile}:`, err);
-                  results.push({ fileName: yamlFile, error: "Failed to process metadata" });
-                }
-              }
-            }
-
-            // 3. Handle Folders
-            if (fs.existsSync(foldersDir)) {
-              const folderFiles = fs.readdirSync(foldersDir);
-              for (const fFile of folderFiles) {
-                if (fFile.endsWith(".yaml") || fFile.endsWith(".yml")) {
-                  const fPath = path.join(foldersDir, fFile);
-                  const fContent = fs.readFileSync(fPath, "utf8");
-                  const fData = yaml.load(fContent) as any;
-                  const fTitle = fData.Title || fData.title || fFile.replace(/\.ya?ml$/, "");
-
-                  const folderResult = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(fTitle, rootFolderId);
-                  const newFolderId = folderResult.lastInsertRowid;
-
-                  const fArticles = fData.Articles || fData.articles;
-                  if (fArticles && Array.isArray(fArticles)) {
-                    for (const artZipId of fArticles) {
-                      const dbId = articleMap.get(artZipId.toString());
-                      if (dbId) {
-                        db.prepare("UPDATE articles SET folder_id = ? WHERE id = ?").run(newFolderId, dbId);
-                      }
-                    }
-                  }
-                }
-              }
-            }
-
-            // Cleanup temp extraction dir
-            fs.rmSync(tempDir, { recursive: true, force: true });
           }
+
+          // 2. Handle Cards (Articles)
+          const articleMap = new Map<string, number>(); // Map ZIP ID to DB ID
+          if (fs.existsSync(cardsDir)) {
+            const cardFiles = fs.readdirSync(cardsDir);
+            const yamlFiles = cardFiles.filter(f => f.endsWith(".yaml") || f.endsWith(".yml"));
+
+            for (const yamlFile of yamlFiles) {
+              const yamlPath = path.join(cardsDir, yamlFile);
+              try {
+                const yamlContent = fs.readFileSync(yamlPath, "utf8");
+                const yamlData = yaml.load(yamlContent) as any;
+                
+                if (!yamlData) continue;
+
+                const title = yamlData.Title || yamlData.title || yamlFile.replace(/\.ya?ml$/, "");
+                const externalId = yamlData.ExternalId || yamlData.id;
+                
+                if (!externalId) {
+                  console.warn(`No ExternalId found in ${yamlFile}`);
+                  continue;
+                }
+
+                const htmlFile = `${externalId}.html`;
+                const htmlPath = path.join(cardsDir, htmlFile);
+
+                if (!fs.existsSync(htmlPath)) {
+                  console.warn(`HTML file not found for ExternalId: ${externalId} (referenced in ${yamlFile})`);
+                  continue;
+                }
+
+                let tagsArr: string[] = [];
+                const rawTags = yamlData.Tags || yamlData.tags;
+                if (Array.isArray(rawTags)) {
+                  tagsArr = rawTags.map((t: string) => 
+                    t.replace(/^Support Tags:/i, "").toLowerCase().trim()
+                  );
+                }
+                const tags = tagsArr.join(",");
+
+                const htmlContent = fs.readFileSync(htmlPath, "utf8");
+                // Update resource paths in HTML if needed
+                const updatedHtml = htmlContent.replace(/src=["']resources\/(.*?)["']/g, 'src="/resources/$1"');
+                const markdownContent = NodeHtmlMarkdown.translate(updatedHtml);
+
+                const result = db.prepare(`
+                  INSERT INTO articles (title, content, tags, folder_id)
+                  VALUES (?, ?, ?, ?)
+                `).run(title, markdownContent, tags, folderId);
+
+                articleMap.set(externalId.toString(), result.lastInsertRowid as number);
+                results.push({ title, success: true });
+              } catch (err) {
+                console.error(`Error processing YAML ${yamlFile}:`, err);
+                results.push({ fileName: yamlFile, error: "Failed to process metadata" });
+              }
+            }
+          }
+
+          // 3. Handle Folders
+          if (fs.existsSync(foldersDir)) {
+            const folderFiles = fs.readdirSync(foldersDir);
+            for (const fFile of folderFiles) {
+              if (fFile.endsWith(".yaml") || fFile.endsWith(".yml")) {
+                const fPath = path.join(foldersDir, fFile);
+                const fContent = fs.readFileSync(fPath, "utf8");
+                const fData = yaml.load(fContent) as any;
+                const fTitle = fData.Title || fData.title || fFile.replace(/\.ya?ml$/, "");
+
+                const folderResult = db.prepare("INSERT INTO folders (name, parent_id) VALUES (?, ?)").run(fTitle, folderId);
+                const newFolderId = folderResult.lastInsertRowid;
+
+                const fArticles = fData.Articles || fData.articles;
+                if (fArticles && Array.isArray(fArticles)) {
+                  for (const artZipId of fArticles) {
+                    const dbId = articleMap.get(artZipId.toString());
+                    if (dbId) {
+                      db.prepare("UPDATE articles SET folder_id = ? WHERE id = ?").run(newFolderId, dbId);
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // Cleanup temp extraction dir
+          fs.rmSync(tempDir, { recursive: true, force: true });
         } else {
           // Handle single files as before
           let title = fileName.replace(extension, "");
@@ -589,7 +348,13 @@ async function startServer() {
         LEFT JOIN articles art ON a.article_id = art.id
         ORDER BY a.created_at DESC
       `).all();
-      res.json({ folders, teams, articles, users, folderAccess, announcements });
+      const quizzes = db.prepare(`
+        SELECT q.*, t.name as team_name 
+        FROM quizzes q 
+        LEFT JOIN teams t ON q.team_id = t.id
+        ORDER BY q.created_at DESC
+      `).all();
+      res.json({ folders, teams, articles, users, folderAccess, announcements, quizzes });
     } catch (err) {
       res.status(500).json({ error: "Database error" });
     }
@@ -958,6 +723,199 @@ async function startServer() {
       res.json({ id: result.lastInsertRowid });
     } catch (err) {
       console.error("Error creating announcement:", err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  // Quiz Routes
+  app.get("/api/admin/quiz-content", (req, res) => {
+    const { days } = req.query;
+    const daysInt = parseInt(days as string) || 7;
+    try {
+      const articles = db.prepare(`
+        SELECT title, content, updated_at 
+        FROM articles 
+        WHERE updated_at >= datetime('now', ?)
+      `).all(`-${daysInt} days`);
+      
+      const announcements = db.prepare(`
+        SELECT message, created_at 
+        FROM announcements 
+        WHERE created_at >= datetime('now', ?)
+      `).all(`-${daysInt} days`);
+      
+      res.json({ articles, announcements });
+    } catch (err) {
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.get("/api/quizzes", (req, res) => {
+    try {
+      const quizzes = db.prepare(`
+        SELECT q.*, t.name as team_name 
+        FROM quizzes q 
+        LEFT JOIN teams t ON q.team_id = t.id
+        ORDER BY q.created_at DESC
+      `).all();
+      res.json(quizzes);
+    } catch (err) {
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.get("/api/quizzes/:id", (req, res) => {
+    try {
+      const quiz = db.prepare("SELECT * FROM quizzes WHERE id = ?").get(req.params.id);
+      if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+      const questions = db.prepare("SELECT * FROM quiz_questions WHERE quiz_id = ?").all(req.params.id);
+      res.json({ ...quiz, questions: questions.map((q: any) => ({ ...q, options: JSON.parse(q.options) })) });
+    } catch (err) {
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.post("/api/quizzes", (req, res) => {
+    const { title, description, team_id, expires_at, created_by, questions, status } = req.body;
+    try {
+      const insertQuiz = db.prepare(`
+        INSERT INTO quizzes (title, description, team_id, expires_at, created_by, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      const insertQuestion = db.prepare(`
+        INSERT INTO quiz_questions (quiz_id, question, options, correct_option_index, feedback, article_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      const transaction = db.transaction((qData) => {
+        const result = insertQuiz.run(qData.title, qData.description, qData.team_id, qData.expires_at, qData.created_by, qData.status || 'draft');
+        const quizId = result.lastInsertRowid;
+        for (const q of qData.questions) {
+          insertQuestion.run(quizId, q.question, JSON.stringify(q.options), q.correct_option_index, q.feedback || null, q.article_id || null);
+        }
+        return quizId;
+      });
+
+      const quizId = transaction({ title, description, team_id, expires_at, created_by, questions, status });
+      res.json({ id: quizId });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.put("/api/quizzes/:id", (req, res) => {
+    const { title, description, team_id, expires_at, questions, status } = req.body;
+    const quizId = req.params.id;
+    try {
+      const updateQuiz = db.prepare(`
+        UPDATE quizzes SET title = ?, description = ?, team_id = ?, expires_at = ?, status = ?
+        WHERE id = ?
+      `);
+      const deleteQuestions = db.prepare("DELETE FROM quiz_questions WHERE quiz_id = ?");
+      const insertQuestion = db.prepare(`
+        INSERT INTO quiz_questions (quiz_id, question, options, correct_option_index, feedback, article_id)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      const transaction = db.transaction((qData) => {
+        updateQuiz.run(qData.title, qData.description, qData.team_id, qData.expires_at, qData.status, quizId);
+        deleteQuestions.run(quizId);
+        for (const q of qData.questions) {
+          insertQuestion.run(quizId, q.question, JSON.stringify(q.options), q.correct_option_index, q.feedback || null, q.article_id || null);
+        }
+      });
+
+      transaction({ title, description, team_id, expires_at, questions, status });
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.post("/api/quizzes/:id/submit", (req, res) => {
+    const { user_id, score, total_questions } = req.body;
+    const quizId = req.params.id;
+    try {
+      db.prepare(`
+        INSERT INTO quiz_submissions (quiz_id, user_id, score, total_questions)
+        VALUES (?, ?, ?, ?)
+      `).run(quizId, user_id, score, total_questions);
+      res.json({ success: true });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.get("/api/quizzes/:id/stats", (req, res) => {
+    const quizId = req.params.id;
+    try {
+      const quiz = db.prepare("SELECT * FROM quizzes WHERE id = ?").get(quizId);
+      if (!quiz) return res.status(404).json({ error: "Quiz not found" });
+
+      // Submissions with user info
+      const submissions = db.prepare(`
+        SELECT s.*, u.name as user_name, t.name as team_name
+        FROM quiz_submissions s
+        JOIN users u ON s.user_id = u.id
+        LEFT JOIN teams t ON u.team_id = t.id
+        WHERE s.quiz_id = ?
+        ORDER BY s.submitted_at DESC
+      `).all(quizId);
+
+      // Average score
+      const avgScore = db.prepare(`
+        SELECT AVG(CAST(score AS FLOAT) / total_questions * 100) as average
+        FROM quiz_submissions
+        WHERE quiz_id = ?
+      `).get(quizId);
+
+      // Team averages
+      const teamAverages = db.prepare(`
+        SELECT t.name as team_name, AVG(CAST(s.score AS FLOAT) / s.total_questions * 100) as average
+        FROM quiz_submissions s
+        JOIN users u ON s.user_id = u.id
+        JOIN teams t ON u.team_id = t.id
+        WHERE s.quiz_id = ?
+        GROUP BY t.id
+      `).all(quizId);
+
+      // Pending users (users in the target team who haven't submitted)
+      let pendingUsers = [];
+      if (quiz.team_id) {
+        pendingUsers = db.prepare(`
+          SELECT u.id, u.name, u.email
+          FROM users u
+          WHERE u.team_id = ? 
+          AND u.id NOT IN (SELECT user_id FROM quiz_submissions WHERE quiz_id = ?)
+        `).all(quiz.team_id, quizId);
+      } else {
+        pendingUsers = db.prepare(`
+          SELECT u.id, u.name, u.email
+          FROM users u
+          WHERE u.id NOT IN (SELECT user_id FROM quiz_submissions WHERE quiz_id = ?)
+        `).all(quizId);
+      }
+
+      res.json({
+        submissions,
+        averageScore: avgScore.average || 0,
+        teamAverages,
+        pendingUsers
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Database error" });
+    }
+  });
+
+  app.delete("/api/quizzes/:id", (req, res) => {
+    try {
+      db.prepare("DELETE FROM quizzes WHERE id = ?").run(req.params.id);
+      res.json({ success: true });
+    } catch (err) {
       res.status(500).json({ error: "Database error" });
     }
   });

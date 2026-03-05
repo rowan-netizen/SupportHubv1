@@ -4,13 +4,16 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "NODE_ENV=development tsx server.ts",
+    "dev": "tsx server.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@tiptap/extension-image": "^3.20.0",
@@ -27,7 +30,7 @@
     "@tiptap/starter-kit": "^3.20.0",
     "@vitejs/plugin-react": "^5.0.4",
     "adm-zip": "^0.5.16",
-    "better-sqlite3": "^11.8.0",
+    "better-sqlite3": "^12.4.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "dotenv": "^17.2.3",
@@ -52,9 +55,7 @@
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
-    "typescript": "~5.8.2"
-  },
-  "overrides": {
-    "glob": "^11.1.0"
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
   }
 }
